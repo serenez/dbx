@@ -4008,7 +4008,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function completionScopeKey(connectionId: string, database: string, schema?: string): string {
-    return `${connectionId}:${database}:${schema ?? ""}`;
+    return `${connectionId}:${database}:${schema?.toLowerCase() ?? ""}`;
   }
 
   function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string): string {
@@ -4135,7 +4135,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string, globalSearch = false, currentSchema?: string): Promise<SqlCompletionTable[]> {
     const oracleAssistant = getConfig(connectionId)?.db_type === "oracle";
-    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, currentSchema) : schema?.trim() || undefined;
+    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
     const response = await completionAssistantSearch({
       connection_id: connectionId,

@@ -184,6 +184,26 @@ function closeAllRegularSurfaces() {
   closeSpecialRegularSurfaces();
 }
 
+function closeOtherActiveTabs() {
+  if (props.settingsPageActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("settings");
+    return;
+  }
+  if (props.driverStoreActive) {
+    queryStore.closeRegularTabs();
+    closeSpecialRegularSurfaces("driverStore");
+    return;
+  }
+
+  const tab = queryStore.tabs.find((item) => item.id === queryStore.activeTabId);
+  if (!tab) return;
+  if (tab.pinned) queryStore.closeOtherFixedTabs(tab.id);
+  else closeOtherRegularTabsFromTab(tab);
+}
+
+defineExpose({ closeOtherActiveTabs });
+
 function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextMenuItem[] {
   const keep = surface;
   const closeCurrent = surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-settings-page");
@@ -207,6 +227,7 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
       },
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,
@@ -269,6 +290,7 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: closeOtherAction,
       disabled: closeOtherDisabled,
       icon: X,
+      shortcut: settingsStore.editorSettings.shortcuts.closeOtherTabs,
     },
     {
       label: closeAllLabel,

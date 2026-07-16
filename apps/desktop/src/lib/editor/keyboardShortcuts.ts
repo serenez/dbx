@@ -3,6 +3,7 @@ import { normalizeShortcutSettings, type ShortcutActionId, type ShortcutSettings
 
 export interface ShortcutLikeEvent {
   key: string;
+  code?: string;
   metaKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
@@ -14,6 +15,12 @@ function normalizeKey(key: string): string {
   if (key === " ") return "Space";
   if (key === "+" || key === "Plus") return "Plus";
   return key.length === 1 ? key.toLowerCase() : key;
+}
+
+function matchesShortcutKey(event: ShortcutLikeEvent, key: string): boolean {
+  if (normalizeKey(event.key) === normalizeKey(key)) return true;
+  if (!event.altKey || !/^Key[A-Z]$/.test(event.code ?? "") || !/^[A-Z]$/i.test(key)) return false;
+  return event.code!.slice(3).toLowerCase() === key.toLowerCase();
 }
 
 function shortcutKeyName(key: string): string | null {
@@ -82,7 +89,7 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string): boo
 
   if (!!event.altKey !== modifiers.has("Alt")) return false;
   if (!!event.shiftKey !== modifiers.has("Shift")) return false;
-  return normalizeKey(event.key) === normalizeKey(key);
+  return matchesShortcutKey(event, key);
 }
 
 function actionShortcut(actionId: ShortcutActionId, shortcuts?: Partial<ShortcutSettings>): string {
@@ -97,6 +104,10 @@ export function isExecuteSqlShortcut(event: ShortcutLikeEvent, shortcuts?: Parti
 
 export function isCloseTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("closeTab", shortcuts));
+}
+
+export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts));
 }
 
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

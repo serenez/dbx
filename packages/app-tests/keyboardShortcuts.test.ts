@@ -4,6 +4,7 @@ import {
   eventToShortcut,
   isBrowserReloadShortcut,
   isCancelSearchShortcut,
+  isCloseOtherTabsShortcut,
   isCloseTabShortcut,
   isCopySidebarSelectionShortcut,
   isExecuteSqlShortcut,
@@ -133,6 +134,13 @@ test("matches Cmd+W for closing query tabs", () => {
 
 test("ignores Ctrl+W for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), false);
+});
+
+test("matches configurable Option+Command+W for closing other tabs", () => {
+  assert.equal(isCloseOtherTabsShortcut({ key: "∑", code: "KeyW", altKey: true, metaKey: true }), true);
+  assert.equal(isCloseOtherTabsShortcut({ key: "w", metaKey: true }), false);
+  assert.equal(isCloseOtherTabsShortcut({ key: "w", altKey: true, ctrlKey: true }), false);
+  assert.equal(isCloseOtherTabsShortcut({ key: "o", ctrlKey: true, shiftKey: true }, { closeOtherTabs: "Shift+Mod+O" } as any), true);
 });
 
 test("matches Ctrl+F for focusing search", () => {

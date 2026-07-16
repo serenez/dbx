@@ -25,6 +25,7 @@ export type ShortcutActionId =
   | "newQuery"
   | "openSettings"
   | "closeTab"
+  | "closeOtherTabs"
   | "focusSearch"
   | "quickOpen"
   | "switchToPreviousTab"
@@ -209,6 +210,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutCloseTab",
     scope: "global",
     defaultShortcut: "Meta+W",
+  },
+  {
+    id: "closeOtherTabs",
+    labelKey: "contextMenu.closeOtherTabs",
+    scope: "global",
+    defaultShortcut: "Alt+Meta+W",
   },
   {
     id: "focusSearch",

@@ -215,7 +215,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "closeOtherTabs",
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
-    defaultShortcut: "Alt+Meta+W",
+    defaultShortcut: "Alt+Mod+W",
   },
   {
     id: "focusSearch",

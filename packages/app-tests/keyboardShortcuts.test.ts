@@ -136,10 +136,12 @@ test("ignores Ctrl+W for closing query tabs", () => {
   assert.equal(isCloseTabShortcut({ key: "w", ctrlKey: true }), false);
 });
 
-test("matches configurable Option+Command+W for closing other tabs", () => {
+test("matches cross-platform shortcuts for closing other tabs", () => {
   assert.equal(isCloseOtherTabsShortcut({ key: "∑", code: "KeyW", altKey: true, metaKey: true }), true);
   assert.equal(isCloseOtherTabsShortcut({ key: "w", metaKey: true }), false);
-  assert.equal(isCloseOtherTabsShortcut({ key: "w", altKey: true, ctrlKey: true }), false);
+  assert.equal(isCloseOtherTabsShortcut({ key: "w", altKey: true, ctrlKey: true }), true);
+  assert.equal(isCloseOtherTabsShortcut({ key: "w", ctrlKey: true }), false);
+  assert.equal(isCloseOtherTabsShortcut({ key: "W", altKey: true, ctrlKey: true, shiftKey: true }), false);
   assert.equal(isCloseOtherTabsShortcut({ key: "o", ctrlKey: true, shiftKey: true }, { closeOtherTabs: "Shift+Mod+O" } as any), true);
 });
 

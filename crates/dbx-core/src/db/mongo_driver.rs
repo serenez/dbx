@@ -1,6 +1,6 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::{ClientOptions, GridFsBucketOptions, IndexOptions},
+    options::{ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications},
     Client, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -1038,7 +1038,7 @@ pub async fn update_documents(
     let update_value: serde_json::Value =
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
-    let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
     let array_filters = parse_update_array_filters(options_json)?;
     let col = client.database(database).collection::<Document>(collection);
     let result = if many {
@@ -1185,7 +1185,7 @@ pub async fn find_one_and_update(
     let update_value: serde_json::Value =
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
-    let update = json_object_to_document(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
+    let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
     let options: MongoFindOneAndUpdateOptions = parse_find_and_modify_options(options_json, "findOneAndUpdate")?;
     let col = client.database(database).collection::<Document>(collection);
     let mut action = col.find_one_and_update(filter, update);
@@ -1388,6 +1388,22 @@ pub fn json_object_to_document(value: &serde_json::Value) -> Result<Document, St
     match json_value_to_bson(value) {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
+    }
+}
+
+fn json_update_to_modifications(value: &serde_json::Value) -> Result<UpdateModifications, String> {
+    match json_value_to_bson(value) {
+        Bson::Document(document) => Ok(UpdateModifications::Document(document)),
+        Bson::Array(stages) => stages
+            .into_iter()
+            .enumerate()
+            .map(|(index, stage)| match stage {
+                Bson::Document(document) => Ok(document),
+                other => Err(format!("Update pipeline stage {} must be a JSON object, got {other:?}", index + 1)),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(UpdateModifications::Pipeline),
+        other => Err(format!("Expected a JSON object or pipeline array, got {other:?}")),
     }
 }
 
@@ -1659,6 +1675,47 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_modifications_accept_document_and_pipeline() {
+        let document = json_update_to_modifications(&serde_json::json!({ "$set": { "status": "done" } })).unwrap();
+        match document {
+            mongodb::options::UpdateModifications::Document(document) => {
+                assert_eq!(document, doc! { "$set": { "status": "done" } });
+            }
+            other => panic!("expected document update, got {other:?}"),
+        }
+
+        let owner_id = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let pipeline = json_update_to_modifications(&serde_json::json!([
+            { "$set": { "update_date": { "$add": ["$update_date", 1000] } } },
+            { "$set": { "owner_id": { "$oid": owner_id.to_hex() } } }
+        ]))
+        .unwrap();
+        match pipeline {
+            mongodb::options::UpdateModifications::Pipeline(stages) => {
+                assert_eq!(
+                    stages,
+                    vec![
+                        doc! { "$set": { "update_date": { "$add": ["$update_date", 1000_i64] } } },
+                        doc! { "$set": { "owner_id": owner_id } },
+                    ]
+                );
+            }
+            other => panic!("expected pipeline update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_modifications_reject_invalid_shapes() {
+        let stage_error =
+            json_update_to_modifications(&serde_json::json!([{ "$set": { "status": "done" } }, "invalid"]))
+                .unwrap_err();
+        assert!(stage_error.contains("stage 2"));
+
+        let value_error = json_update_to_modifications(&serde_json::json!("invalid")).unwrap_err();
+        assert!(value_error.contains("object or pipeline array"));
+    }
 
     #[test]
     fn update_options_parse_array_filters() {

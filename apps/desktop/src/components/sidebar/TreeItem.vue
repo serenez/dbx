@@ -150,6 +150,7 @@ import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selec
 import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
+import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
@@ -662,6 +663,10 @@ function isTooltipDisabled(): boolean {
 async function toggle() {
   const node = props.node;
   if (node.isLoading) {
+    if (!node.isExpanded) {
+      node.isExpanded = true;
+      emit("node-toggled", node, false);
+    }
     return;
   }
   emit("search-toggle", node);
@@ -1329,13 +1334,17 @@ async function openProcessList() {
   }
 }
 
-async function openMysqlDashboard() {
+async function openServerDashboard() {
   const node = props.node;
   if (!node.connectionId) return;
   try {
     await connectionStore.ensureConnected(node.connectionId);
     connectionStore.activeConnectionId = node.connectionId;
-    queryStore.openMysqlDashboard(node.connectionId);
+    if (currentDatabaseType() === "postgres") {
+      queryStore.openPostgresDashboard(node.connectionId);
+    } else {
+      queryStore.openMysqlDashboard(node.connectionId);
+    }
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
   }
@@ -5125,8 +5134,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (node.connectionId && connectionSupportsProcessList(connectionStore.getConfig(node.connectionId))) {
       items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
-    if (node.connectionId && connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId))) {
-      items.push({ label: t("contextMenu.serverDashboard"), action: openMysqlDashboard, icon: Gauge });
+    if (node.connectionId && (connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
+      items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
       items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });

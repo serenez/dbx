@@ -78,6 +78,7 @@ import { AI_TABLE_MENTION_CANDIDATE_LIMIT, AI_TABLE_MENTION_SCHEMA_LIMIT, filter
 import { isAiPromptImeCompositionEvent, shouldSubmitAiPromptOnKeydown } from "@/lib/ai/aiPromptKeyboard";
 import { looksLikeActionProposal, containsChinese } from "@/lib/ai/aiProposalDetect";
 import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
+import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -1871,6 +1872,7 @@ async function openExternalUrl(url: string) {
                     <ChevronRight class="h-3 w-3 transition-transform duration-200" :class="{ 'rotate-90': reasoningExpanded }" />
                     <Loader2 v-if="msg.isThinking" class="h-3 w-3 animate-spin" />
                     <span>{{ t("ai.reasoningProcess") }}</span>
+                    <span v-if="shouldShowReasoningCharCount(msg.reasoning, reasoningExpanded)" :class="reasoningCharCountClass(!!msg.isThinking)">{{ msg.reasoning?.length ?? 0 }} {{ t("ai.chars") }}</span>
                   </button>
                   <div
                     class="overflow-hidden transition-[max-height,opacity] duration-200 ease-in-out"

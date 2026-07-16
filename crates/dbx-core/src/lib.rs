@@ -49,6 +49,7 @@ pub mod schema;
 pub mod schema_diff;
 pub mod sql;
 pub mod sql_analysis;
+pub mod sql_diagnostics;
 pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_file_import;

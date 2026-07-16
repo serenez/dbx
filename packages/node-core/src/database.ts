@@ -970,7 +970,7 @@ async function executeRedisCommandDirect(config: ConnectionConfig, db: number, c
   const command = argv[0].toUpperCase();
   const safety = classifyRedisCommand(command) as RedisCommandSafety;
   if (!options?.skipSafetyCheck && safety === "blocked") {
-    throw new Error(`Redis command is blocked for safety: ${command}`);
+    throw new Error("Redis command is blocked for safety. Enable dangerous commands with DBX_MCP_ALLOW_DANGEROUS_SQL=1.");
   }
 
   const { Redis } = await import("ioredis");

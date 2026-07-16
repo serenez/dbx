@@ -293,6 +293,7 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
 pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
     use mysql_async::consts::ColumnType::*;
     let ty = column.column_type();
+    let flags = column.flags();
     let binary = is_mysql_binary_charset(column);
     match ty {
         MYSQL_TYPE_TINY => "tinyint",
@@ -348,7 +349,13 @@ pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
             }
         }
         MYSQL_TYPE_STRING => {
-            if binary {
+            // MySQL reports ENUM/SET result columns as STRING plus a flag,
+            // rather than using the dedicated protocol type codes.
+            if flags.contains(mysql_async::consts::ColumnFlags::ENUM_FLAG) {
+                "enum"
+            } else if flags.contains(mysql_async::consts::ColumnFlags::SET_FLAG) {
+                "set"
+            } else if binary {
                 "binary"
             } else {
                 "char"
@@ -3923,6 +3930,14 @@ mod tests {
         assert_eq!(
             mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::empty(), 16)),
             "char"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::ENUM_FLAG, 16)),
+            "enum"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::SET_FLAG, 16)),
+            "set"
         );
         assert_eq!(
             mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_DATETIME, utf8, ColumnFlags::empty(), 19)),

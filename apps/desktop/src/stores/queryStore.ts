@@ -457,7 +457,11 @@ export const useQueryStore = defineStore("query", () => {
       if (throwOnError) throw error;
     } finally {
       if (tab.resultSessionId === sessionId) tab.resultSessionId = undefined;
-      if (tab.result?.session_id === sessionId) tab.result.session_id = undefined;
+      if (tab.result?.session_id === sessionId) {
+        tab.result.session_id = undefined;
+        // 原地修改了负载，让持有它的 tab 与 run 的估算值都失效
+        invalidateResultEstimateForPayload(tab.result);
+      }
     }
   }
 
@@ -505,12 +509,27 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function touchResult(tab: QueryTab | undefined, accessedAt = Date.now()) {
+  function touchResult(tab: QueryTab | undefined, accessedAt = Date.now(), options: { reuseEstimatedBytes?: boolean } = {}) {
     if (tab?.result || tab?.results) {
       tab.resultAccessedAt = accessedAt;
-      tab.resultEstimatedBytes = estimateQueryResultsBytes(tab.result, tab.results);
+      // 纯访问路径（如切换标签页）可复用已算好的估算值：estimateQueryResultsBytes
+      // 会同步深遍历整份结果集，挂在 sync watch 上会直接阻塞切页交互。
+      if (!options.reuseEstimatedBytes || tab.resultEstimatedBytes === undefined) {
+        tab.resultEstimatedBytes = estimateQueryResultsBytes(tab.result, tab.results);
+      }
       tab.resultCacheState = "memory";
       tab.resultEvicted = undefined;
+    }
+  }
+
+  /** 结果负载被原地修改（如保存后写回单元格）时，让持有它的 tab/run 的字节估算失效，下次访问按需重算。 */
+  function invalidateResultEstimateForPayload(result: QueryResult | undefined) {
+    if (!result) return;
+    for (const tab of tabs.value) {
+      if (tab.result === result || tab.results?.includes(result)) tab.resultEstimatedBytes = undefined;
+      for (const run of tab.resultRuns ?? []) {
+        if (run.result === result || run.results?.includes(result)) run.resultEstimatedBytes = undefined;
+      }
     }
   }
 
@@ -593,7 +612,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryEditabilityReason = run.queryEditabilityReason;
     tab.mongoEditTarget = run.mongoEditTarget;
     tab.tableMeta = run.tableMeta;
-    touchResult(tab);
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
   }
 
   async function restoreResultRunPayload(tab: QueryTab, runId: string) {
@@ -614,6 +633,9 @@ export const useQueryStore = defineStore("query", () => {
         result: snapshotRun.result ? markQueryResultRowsRaw(snapshotRun.result) : undefined,
         results: snapshotRun.results ? markQueryResultsRowsRaw(snapshotRun.results) : undefined,
         resultCacheState: "memory" as const,
+        // 快照编解码会重建负载（如省略 session_id），落盘前的估算值不再对应
+        // 恢复后的对象，置空以便 projectResultRun 按当前负载重算
+        resultEstimatedBytes: undefined,
       },
     ])[0]!;
     tab.resultRuns = tab.resultRuns?.map((item) => (item.id === runId ? restoredRun : item));
@@ -845,7 +867,8 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultLocalSortOriginalMongoDocuments = undefined;
     }
 
-    touchResult(tab);
+    // 本地排序只是重排既有行/文档，字节规模不变，可复用估算值
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     syncDisplayedResultRun(tab, tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql);
   }
 
@@ -2272,6 +2295,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = undefined;
     tab.executionId = undefined;
+    touchResult(tab);
   }
 
   function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
@@ -3806,11 +3830,9 @@ export const useQueryStore = defineStore("query", () => {
       if (tab) useConnectionStore().recordConnectionLostError(tab.connectionId, e);
       const current = tabs.value.find((t) => t.id === id);
       if (current && current.executionId === executionId) {
-        current.isExecuting = false;
-        current.isCancelling = false;
-        current.executionId = undefined;
-        current.queryExecutionStartedAt = undefined;
-        current.result = toErrorResult(e);
+        // 复用 setErrorResult 的完整清理：分组结果不清空的话，错误结果不会展示，
+        // 估算值也会继续按旧的 results 计算
+        setErrorResult(id, e);
       }
       return false;
     } finally {
@@ -3845,7 +3867,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
     tab.resultSortedSql = undefined;
-    touchResult(tab);
+    // results 数组未变，估算值与当前激活的 result 无关，可直接复用
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -3863,12 +3886,8 @@ export const useQueryStore = defineStore("query", () => {
     if (stuck.length > 0) {
       const connStore = useConnectionStore();
       stuck.forEach((tab) => {
-        tab.isExecuting = false;
-        tab.isCancelling = false;
-        tab.queryExecutionStartedAt = undefined;
-        tab.executionId = undefined;
         const error = new Error(t("editor.connectionMayBeLost"));
-        tab.result = toErrorResult(error);
+        setErrorResult(tab.id, error);
         connStore.markConnectionLost(tab.connectionId, error);
       });
     }
@@ -3944,7 +3963,11 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId,
     (id) => {
       rememberActiveTab(id);
-      touchResult(tabs.value.find((tab) => tab.id === id));
+      touchResult(
+        tabs.value.find((tab) => tab.id === id),
+        Date.now(),
+        { reuseEstimatedBytes: true },
+      );
     },
     { flush: "sync" },
   );
@@ -3959,7 +3982,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;
-    tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns) : tab.resultRuns;
+    // 快照编解码会重建负载，落盘前的各 run 估算值不再对应恢复后的对象，
+    // 置空让 projectResultRun 按需重算
+    tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns).map((run) => ({ ...run, resultEstimatedBytes: undefined })) : tab.resultRuns;
     tab.activeResultRunId = snapshot.activeResultRunId ?? tab.activeResultRunId;
     if (!tab.result && !tab.results && !tab.resultRuns) return false;
 
@@ -4344,6 +4369,7 @@ export const useQueryStore = defineStore("query", () => {
     setExecuting,
     setExecutingWithId,
     setErrorResult,
+    invalidateResultEstimateForPayload,
     toggleResultAutoSave,
     setActiveResultRun,
     removeResultRun,

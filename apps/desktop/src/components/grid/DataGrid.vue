@@ -97,6 +97,7 @@ import {
   nextKeyboardTransposeState,
   nextTransposeState,
   nextTransposeStateForRecordCount,
+  restoreDataGridAfterTranspose,
   transposeRecordIndexesForMode,
   transposeRecordWidthsForDensity,
   transposeFieldWidth,
@@ -128,7 +129,7 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, restoredDataGridScrollLeft, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
 import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
@@ -4837,11 +4838,10 @@ function drawCanvasGrid() {
 }
 
 watch(
-  [useCanvasGridRows, hasVisibleRows],
+  [useCanvasGridRows, hasVisibleRows, isErrorResult],
   () => {
-    // When an empty table gets its first pending row, the canvas scroller is created by
-    // the v-if branch after the original mount-time observer attempt has already no-op'd.
-    // Reattach after that branch mounts so the canvas/overlay get real viewport dimensions.
+    // Empty and error surfaces replace the canvas scroller. Reattach after the
+    // normal branch remounts so the canvas/overlay get real viewport dimensions.
     nextTick(attachCanvasResizeObserver);
   },
   { immediate: true },
@@ -6303,12 +6303,12 @@ watch(isTransposeMode, (active) => {
   }
 
   nextTick(() => {
-    const scroller = gridScrollerElement();
-    if (!scroller) return;
-    // Transpose mode replaces the normal grid scroller, so restore its state and
-    // reconnect overflow observers only after Vue mounts the new element.
-    scroller.scrollLeft = restoredDataGridScrollLeft(gridScrollLeftBeforeTranspose, scroller.scrollWidth, scroller.clientWidth);
-    refreshGridScrollerMetrics();
+    restoreDataGridAfterTranspose({
+      scroller: gridScrollerElement(),
+      scrollLeftBeforeTranspose: gridScrollLeftBeforeTranspose,
+      attachCanvasResizeObserver,
+      refreshGridScrollerMetrics,
+    });
   });
 });
 

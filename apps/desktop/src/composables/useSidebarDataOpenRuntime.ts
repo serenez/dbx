@@ -240,6 +240,8 @@ export function useSidebarDataOpenRuntime() {
 
       const limit = tableOpenPageLimit();
       const shouldRefreshTableMeta = !cachedTableMeta;
+      // Dameng metadata calls must remain serialized behind the table query.
+      const deferTableMetaRefresh = effectiveDbType === "dameng";
       if (cachedTableMeta) {
         openDataLog("info", "metadata:cache-hit", {
           traceId,
@@ -250,8 +252,11 @@ export function useSidebarDataOpenRuntime() {
           ageMs: Math.round(cachedTableMetaAgeMs),
           elapsed: elapsed(),
         });
-      } else {
+      } else if (deferTableMetaRefresh) {
         logPhase("metadata-deferred", { tabId });
+      } else {
+        void refreshTableMetaInBackground();
+        logPhase("metadata-started", { tabId });
       }
 
       // Check if superseded by a newer openData call
@@ -295,8 +300,13 @@ export function useSidebarDataOpenRuntime() {
       });
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       logPhase("execute-tab-sql", { tabId });
+<<<<<<< HEAD
       if (shouldRefreshTableMeta && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);
+=======
+      if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata()) {
+        void refreshTableMetaInBackground();
+>>>>>>> 86c1a7fe5 (fix(sidebar): 修复首次打开表数据的主键识别)
         logPhase("metadata-started", { tabId });
       }
     } catch (e: any) {

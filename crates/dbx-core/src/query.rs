@@ -3163,6 +3163,7 @@ where
                 Ok(stmt) => {
                     let column_types: Vec<String> =
                         stmt.columns().iter().map(|column| column.type_().name().to_string()).collect();
+                    let column_classes = db::postgres::classify_pg_column_types(&column_types);
                     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
                     match conn.query_raw(&stmt, params).await {
                         Ok(stream) => {
@@ -3175,10 +3176,13 @@ where
                                     Ok(row) => {
                                         let values = (0..row.columns().len())
                                             .map(|index| {
-                                                db::postgres::pg_value_to_json(
+                                                db::postgres::pg_value_to_json_classified(
                                                     &row,
                                                     index,
-                                                    column_types.get(index).map(String::as_str).unwrap_or(""),
+                                                    column_classes
+                                                        .get(index)
+                                                        .copied()
+                                                        .unwrap_or(db::postgres::PgColType::Other),
                                                 )
                                             })
                                             .collect();
@@ -3335,6 +3339,7 @@ async fn execute_manual_txn_postgres_statement(
         let stmt = conn.prepare_cached(sql).await.map_err(|e| format!("Prepare failed: {e}"))?;
         let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
         let column_types: Vec<String> = stmt.columns().iter().map(|c| c.type_().name().to_string()).collect();
+        let column_classes = db::postgres::classify_pg_column_types(&column_types);
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
         let stream = conn.query_raw(&stmt, params).await.map_err(|e| format!("Query failed: {e}"))?;
         tokio::pin!(stream);
@@ -3347,7 +3352,13 @@ async fn execute_manual_txn_postgres_statement(
             }
             let row = row_result.map_err(|e| format!("Query failed: {e}"))?;
             let values: Vec<serde_json::Value> = (0..row.columns().len())
-                .map(|i| db::postgres::pg_value_to_json(&row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
+                .map(|i| {
+                    db::postgres::pg_value_to_json_classified(
+                        &row,
+                        i,
+                        column_classes.get(i).copied().unwrap_or(db::postgres::PgColType::Other),
+                    )
+                })
                 .collect();
             data.push(values);
         }

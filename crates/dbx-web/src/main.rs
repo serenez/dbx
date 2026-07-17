@@ -611,6 +611,8 @@ async fn main() {
     let mut app = Router::new()
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
+        // 默认谓词会跳过 text/event-stream（SSE）与小于 32 字节的响应
+        .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     // Static file serving

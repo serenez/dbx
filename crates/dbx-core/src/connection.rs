@@ -1044,6 +1044,7 @@ impl AppState {
             configs.get(connection_id).ok_or("Connection config not found")?.clone()
         };
         let db_type = Some(config.db_type);
+        let validate_existing_pool = should_validate_existing_pool_before_reuse(config.db_type);
 
         let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
         let pool_key = session_scoped_pool_key_for(Some(&config), base_pool_key, client_session_id);
@@ -1053,7 +1054,7 @@ impl AppState {
             drop(conns);
             if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
                 // Recreate below using the current DuckDB isolation mode.
-            } else if !self.remove_stale_connection_pool(&pool_key).await {
+            } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
                 self.touch_pool_activity(&pool_key).await;
                 return Ok(pool_key);
             }
@@ -3237,6 +3238,13 @@ fn uses_agent_connection_pool(db_type: &DatabaseType) -> bool {
     matches!(*db_type, agent_connection_pool_database_type!())
 }
 
+fn should_validate_existing_pool_before_reuse(db_type: DatabaseType) -> bool {
+    // PostgreSQL uses deadpool's Fast recycling and the query executor's
+    // ReconnectAndRetry path. An eager SELECT 1 here would add a network
+    // round-trip before every query without improving recovery behavior.
+    !matches!(db_type, DatabaseType::Postgres)
+}
+
 #[cfg(test)]
 fn uses_bare_mysql_pool(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch)
@@ -3600,6 +3608,12 @@ mod tests {
         assert!(!uses_bare_mysql_pool(&DatabaseType::Databend));
         assert!(database_capabilities::is_agent_type(&DatabaseType::Databend));
         assert!(super::uses_agent_connection_pool(&DatabaseType::ZooKeeper));
+    }
+
+    #[test]
+    fn postgres_pool_reuse_skips_eager_validation_query() {
+        assert!(!super::should_validate_existing_pool_before_reuse(DatabaseType::Postgres));
+        assert!(super::should_validate_existing_pool_before_reuse(DatabaseType::Mysql));
     }
 
     #[test]
@@ -4285,7 +4299,7 @@ mod tests {
 
         assert_eq!(
             connection_url_for_endpoint(&config, &config.host, config.port),
-            "postgres://gaussdb:secret@127.0.0.1:3306/postgres"
+            "postgres://gaussdb:secret@127.0.0.1:3306/postgres?sslmode=disable"
         );
     }
 

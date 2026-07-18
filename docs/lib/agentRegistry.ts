@@ -5,7 +5,7 @@ export interface ArtifactInfo {
   size: number;
 }
 
-export type DownloadSource = "github" | "cnb" | "atomgit" | "official";
+export type DownloadSource = "github" | "cnb" | "official";
 
 export interface DownloadLink {
   source: DownloadSource;
@@ -35,11 +35,6 @@ interface AgentRegistryDriver {
 interface AgentRegistry {
   jres?: Record<string, { platforms?: Record<string, AgentRegistryArtifact> }>;
   drivers?: Record<string, AgentRegistryDriver>;
-}
-
-interface AtomGitRelease {
-  tag_name?: string;
-  assets?: Array<{ name?: string; type?: string }>;
 }
 
 export interface OfflineBundleEntry {
@@ -93,11 +88,9 @@ export interface AgentDownloadCatalog {
 
 const AGENTS_LATEST_RELEASE_API_URL = "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest";
 const CNB_AGENT_REGISTRY_URL = "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json";
-const ATOMGIT_LATEST_RELEASE_API_URL = "https://api.atomgit.com/api/v5/repos/t8y2/dbx/releases/agents-latest";
 const JDBC_PLUGIN_DOWNLOAD_URL = "https://dl.dbxio.com/releases/latest/dbx-jdbc-plugin-latest.zip";
 const GITHUB_RELEASE_DOWNLOAD_PREFIX = "https://github.com/t8y2/dbx/releases/download/";
 const CNB_RELEASE_DOWNLOAD_PREFIX = "https://cnb.cool/dbxio.com/dbx/-/releases/download/";
-const ATOMGIT_RELEASE_DOWNLOAD_PREFIX = "https://atomgit.com/t8y2/dbx/releases/download/";
 const MIN_APP_VERSION = "0.6.0";
 const driverVersionMap = driverVersions as Record<string, string>;
 const nativeDriverKeys = new Set(["oracle", "xugu"]);
@@ -213,13 +206,6 @@ function registryReleaseAssets(registry: AgentRegistry): GitHubReleaseAsset[] {
   return Array.from(assets.values());
 }
 
-function atomGitReleaseAssets(release: AtomGitRelease): GitHubReleaseAsset[] {
-  const tag = release.tag_name || "agents-latest";
-  return (release.assets ?? [])
-    .filter((asset): asset is { name: string; type?: string } => Boolean(asset.name) && asset.type !== "source")
-    .map((asset) => githubReleaseAsset(asset.name, 0, tag));
-}
-
 function hasDownloadAssets(catalog: AgentDownloadCatalog): boolean {
   return catalog.bundles.length > 0 || catalog.drivers.length > 0 || catalog.jres.length > 0 || catalog.nativeAgents.length > 0;
 }
@@ -237,7 +223,6 @@ export function downloadLinksFor(url: string): DownloadLink[] {
   return [
     { source: "github", url },
     { source: "cnb", url: `${CNB_RELEASE_DOWNLOAD_PREFIX}${releasePath}` },
-    { source: "atomgit", url: `${ATOMGIT_RELEASE_DOWNLOAD_PREFIX}${releasePath}` },
   ];
 }
 
@@ -249,7 +234,6 @@ export async function fetchAgentDownloadCatalog(): Promise<AgentDownloadCatalog 
   const loaders: Array<() => Promise<GitHubReleaseAsset[]>> = [
     async () => (await fetchJson<GitHubRelease>(AGENTS_LATEST_RELEASE_API_URL, { Accept: "application/vnd.github+json" })).assets ?? [],
     async () => registryReleaseAssets(await fetchJson<AgentRegistry>(CNB_AGENT_REGISTRY_URL)),
-    async () => atomGitReleaseAssets(await fetchJson<AtomGitRelease>(ATOMGIT_LATEST_RELEASE_API_URL, { Accept: "application/json" })),
   ];
 
   for (const loadAssets of loaders) {

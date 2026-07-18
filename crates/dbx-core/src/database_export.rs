@@ -1057,6 +1057,18 @@ pub async fn begin_database_backup_snapshot_core(
     Ok(DatabaseBackupSnapshot { session_id, schemas })
 }
 
+/// 只有确认底层支持并发请求的多连接池才允许并发预取导出元数据。
+/// SqlServer（Arc<Mutex> 串行客户端）、Agent/ExternalDriver（插件请求超时覆盖
+/// 排队时间且超时会终止 sidecar）、SQLite/DuckDB 等单连接类型都必须回退串行。
+fn concurrent_metadata_prefetch_allowed(pool_kind: Option<&crate::connection::PoolKind>) -> bool {
+    matches!(
+        pool_kind,
+        Some(crate::connection::PoolKind::Postgres(_))
+            | Some(crate::connection::PoolKind::Mysql(..))
+            | Some(crate::connection::PoolKind::ClickHouse(_))
+    )
+}
+
 fn record_export_error(file: &mut std::fs::File, fail_on_error: bool, message: String) -> Result<(), String> {
     if fail_on_error {
         Err(message)
@@ -1254,7 +1266,89 @@ pub async fn export_database_sql_core(
         object_index += 1;
     }
 
-    for table_info in &tables {
+    // 预取各表的 DDL 与列元数据：逐表串行往返在多表数据库上是整库导出耗时的
+    // 主要来源（每表 1-2 次网络往返 × 表数）。有界并发预取后，下方写出循环仍按
+    // 原顺序消费，文件内容与逐表查询完全一致。
+    struct PrefetchedTableMetadata {
+        ddl: Option<Result<String, String>>,
+        columns: Option<Result<Vec<crate::db::ColumnInfo>, String>>,
+    }
+    const EXPORT_METADATA_PREFETCH_CONCURRENCY: usize = 8;
+    let mut prefetched_table_metadata: Vec<Option<PrefetchedTableMetadata>> = Vec::new();
+    prefetched_table_metadata.resize_with(tables.len(), || None);
+    // 防护门按「实际连接池种类」放行，而非数据库类型的能力标记：只有确认底层
+    // 支持并发请求的多连接池（Postgres/MySQL/ClickHouse）才启用并发预取。反例：
+    // 原生 SQL Server 是 Arc<Mutex<..>> 串行客户端；Agent/外部 JDBC（含 SQL Server
+    // legacy profile、PrestoSQL 等路由结果）的插件请求超时覆盖排队时间且超时会
+    // 终止 sidecar；SQLite/DuckDB 等为单连接。被挡住的场景预取 Vec 保持全 None，
+    // 写出循环内的 None 回退路径即原有的逐表串行直查行为。
+    let concurrent_prefetch_is_safe =
+        match state.get_or_create_pool(&request.connection_id, Some(&request.database)).await {
+            Ok(metadata_pool_key) => {
+                concurrent_metadata_prefetch_allowed(state.connections.read().await.get(&metadata_pool_key))
+            }
+            // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
+            Err(_) => false,
+        };
+    if concurrent_prefetch_is_safe
+        && (request.include_structure || request.include_data)
+        && !tables.is_empty()
+        && !is_export_cancelled(&request.export_id).await
+    {
+        use futures::StreamExt;
+        let prefetch_targets: Vec<(usize, String)> =
+            tables.iter().enumerate().map(|(index, table_info)| (index, table_info.name.clone())).collect();
+        let mut prefetch_stream =
+            futures::stream::iter(prefetch_targets.into_iter().map(|(index, table_name)| async move {
+                if is_export_cancelled_now(&request.export_id) {
+                    return (index, PrefetchedTableMetadata { ddl: None, columns: None });
+                }
+                let ddl = if request.include_structure {
+                    Some(
+                        crate::schema::get_table_ddl_core(
+                            state,
+                            &request.connection_id,
+                            &request.database,
+                            &request.schema,
+                            &table_name,
+                            None,
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+                if is_export_cancelled_now(&request.export_id) {
+                    return (index, PrefetchedTableMetadata { ddl, columns: None });
+                }
+                let columns = if request.include_data {
+                    Some(
+                        crate::schema::get_columns_core(
+                            state,
+                            &request.connection_id,
+                            &request.database,
+                            &request.schema,
+                            &table_name,
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+                (index, PrefetchedTableMetadata { ddl, columns })
+            }))
+            .buffer_unordered(EXPORT_METADATA_PREFETCH_CONCURRENCY);
+        while let Some((index, metadata)) = prefetch_stream.next().await {
+            prefetched_table_metadata[index] = Some(metadata);
+            // 取消后不再调度新的预取任务（已在途的任务随 stream 释放而中止），
+            // 写出循环入口的取消检查负责最终收尾
+            if is_export_cancelled_now(&request.export_id) {
+                break;
+            }
+        }
+    }
+
+    for (table_index, table_info) in tables.iter().enumerate() {
         // Check cancellation
         if is_export_cancelled(&request.export_id).await {
             on_progress(ExportProgress {
@@ -1309,16 +1403,25 @@ pub async fn export_database_sql_core(
                     .map_err(|e| format!("Failed to write file: {e}"))?;
                 object_index += 1;
             }
-            match crate::schema::get_table_ddl_core(
-                state,
-                &request.connection_id,
-                &request.database,
-                &request.schema,
-                table_name,
-                None,
-            )
-            .await
+            let ddl_result = match prefetched_table_metadata
+                .get_mut(table_index)
+                .and_then(|m| m.as_mut())
+                .and_then(|m| m.ddl.take())
             {
+                Some(result) => result,
+                None => {
+                    crate::schema::get_table_ddl_core(
+                        state,
+                        &request.connection_id,
+                        &request.database,
+                        &request.schema,
+                        table_name,
+                        None,
+                    )
+                    .await
+                }
+            };
+            match ddl_result {
                 Ok(ddl) => {
                     let ddl = normalize_export_table_ddl(&ddl, Some(db_type));
                     writeln!(file, "{};\n", ddl).map_err(|e| format!("Failed to write file: {e}"))?;
@@ -1336,15 +1439,24 @@ pub async fn export_database_sql_core(
         // Export data
         if request.include_data {
             // Get columns
-            let columns = match crate::schema::get_columns_core(
-                state,
-                &request.connection_id,
-                &request.database,
-                &request.schema,
-                table_name,
-            )
-            .await
+            let columns_result = match prefetched_table_metadata
+                .get_mut(table_index)
+                .and_then(|m| m.as_mut())
+                .and_then(|m| m.columns.take())
             {
+                Some(result) => result,
+                None => {
+                    crate::schema::get_columns_core(
+                        state,
+                        &request.connection_id,
+                        &request.database,
+                        &request.schema,
+                        table_name,
+                    )
+                    .await
+                }
+            };
+            let columns = match columns_result {
                 Ok(cols) => cols,
                 Err(e) => {
                     record_export_error(
@@ -1688,6 +1800,7 @@ fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseTy
 
 #[cfg(test)]
 mod tests {
+    use super::concurrent_metadata_prefetch_allowed;
     use super::{
         build_database_sql_export, build_export_insert_statements, drop_table_if_exists_sql,
         filter_selected_table_infos, format_export_sql_literal, generate_postgres_sequence_create_ddl,
@@ -1707,6 +1820,28 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    #[test]
+    fn concurrent_prefetch_only_allowed_for_multi_connection_pools() {
+        use crate::connection::PoolKind;
+        use std::sync::Arc;
+
+        // ChClient::new 只构造 HTTP 客户端，不发起连接
+        let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
+            "http://127.0.0.1:1",
+            None,
+            None,
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(concurrent_metadata_prefetch_allowed(Some(&clickhouse)));
+
+        // Agent（JDBC sidecar）请求超时覆盖排队时间，必须回退串行
+        let agent =
+            PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(crate::db::agent_driver::AgentDriverClient::test_stub())));
+        assert!(!concurrent_metadata_prefetch_allowed(Some(&agent)));
+
+        assert!(!concurrent_metadata_prefetch_allowed(None));
     }
 
     #[test]

@@ -73,6 +73,41 @@ describe("tableMetadataCache invalidation", () => {
     expect(getCachedTableMetadata(request)?.metadata.columns[0]?.name).toBe("id_new");
   });
 
+  it("invalidating one table does not disturb another table's in-flight load", async () => {
+    const requestB = { ...request, tableName: "orders" } as const;
+    // A、B 同时挂起
+    const releases = new Map<string, (columns: ColumnInfo[]) => void>();
+    mocks.getColumns.mockImplementation(
+      (_connectionId: string, _database: string, _schema: string, tableName: string) =>
+        new Promise<ColumnInfo[]>((resolve) => {
+          releases.set(tableName, resolve);
+        }),
+    );
+    const loadA = loadTableMetadata({ ...request });
+    const loadB = loadTableMetadata({ ...requestB });
+    await Promise.resolve();
+
+    // 仅失效 A
+    invalidateTableMetadataCache({ connectionId: "c1", database: "db", tableName: "users" });
+
+    // B 的 follower 必须复用原在途请求：总请求数保持 2（A 一次 + B 一次）。
+    // 先让出 microtask，coordinator 的 load 才会真正启动，断言才有观察力
+    const followerB = loadTableMetadata({ ...requestB });
+    await Promise.resolve();
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+
+    // B 返回后正常写入缓存
+    releases.get("orders")?.([column("order_id")]);
+    expect((await loadB).metadata.columns[0]?.name).toBe("order_id");
+    expect((await followerB).metadata.columns[0]?.name).toBe("order_id");
+    expect(getCachedTableMetadata(requestB)?.metadata.columns[0]?.name).toBe("order_id");
+
+    // A 跨越失效边界：完成后不得写缓存
+    releases.get("users")?.([column("id_old")]);
+    await loadA;
+    expect(getCachedTableMetadata(request)).toBeUndefined();
+  });
+
   it("caches normally when no invalidation crosses the load", async () => {
     mocks.getColumns.mockResolvedValueOnce([column("id")]);
     await loadTableMetadata({ ...request });

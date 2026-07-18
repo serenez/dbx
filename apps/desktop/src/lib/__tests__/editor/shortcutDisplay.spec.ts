@@ -21,7 +21,7 @@ describe("shortcut display", () => {
 
   it("formats the close other tabs shortcut by platform", () => {
     expect(formatShortcutDisplay("Alt+Mod+W", "MacIntel")).toBe("⌥ ⌘ W");
-    expect(formatShortcutDisplay("Alt+Mod+W", "Win32")).toBe("Ctrl + Alt + W");
+    expect(formatShortcutDisplay("Shift+Alt+W", "Win32")).toBe("Shift + Alt + W");
   });
 
   it("formats shortcut pills with platform separators", () => {

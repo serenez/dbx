@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -29,8 +30,7 @@ pub struct TableCsvExportOptions {
 
 /// CSV 转义直写目标 buffer：包引号 + 内部 `"` 翻倍。值不含 `"` 时整段拷贝，
 /// 不做 replace 分配（逐批流式导出对每个单元格调用，是导出热路径）。
-pub(crate) fn push_csv_escaped(out: &mut String, value: &str) {
-    out.push('"');
+fn push_csv_escaped_content(out: &mut String, value: &str) {
     let mut rest = value;
     while let Some(pos) = rest.find('"') {
         out.push_str(&rest[..=pos]);
@@ -38,26 +38,45 @@ pub(crate) fn push_csv_escaped(out: &mut String, value: &str) {
         rest = &rest[pos + 1..];
     }
     out.push_str(rest);
+}
+
+pub(crate) fn push_csv_escaped(out: &mut String, value: &str) {
+    out.push('"');
+    push_csv_escaped_content(out, value);
+    out.push('"');
+}
+
+struct CsvEscapedWriter<'a>(&'a mut String);
+
+impl fmt::Write for CsvEscapedWriter<'_> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        push_csv_escaped_content(self.0, value);
+        Ok(())
+    }
+}
+
+/// 将表导出 CSV 值直接写入已有 buffer；包括 NULL 在内的值均保留分页导出的带引号旧语义。
+pub(crate) fn push_csv_text_value(out: &mut String, value: &Value) {
+    out.push('"');
+    match value {
+        Value::Null => {}
+        Value::String(value) => push_csv_escaped_content(out, value),
+        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => {
+            fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
+        }
+        // 数组和对象可能包含引号，通过转义 writer 格式化，避免分配中间 JSON 字符串
+        other => fmt::write(&mut CsvEscapedWriter(out), format_args!("{other}"))
+            .expect("writing JSON into a String cannot fail"),
+    }
     out.push('"');
 }
 
 fn push_csv_value(out: &mut String, value: &Value) {
-    match value {
-        Value::Null => {}
-        Value::String(v) => push_csv_escaped(out, v),
-        // 布尔/数字的文本形式不含引号，跳过转义扫描
-        Value::Bool(v) => {
-            out.push('"');
-            out.push_str(if *v { "true" } else { "false" });
-            out.push('"');
-        }
-        Value::Number(v) => {
-            out.push('"');
-            out.push_str(&v.to_string());
-            out.push('"');
-        }
-        other => push_csv_escaped(out, &other.to_string()),
+    if value.is_null() {
+        return;
     }
+    push_csv_text_value(out, value);
 }
 
 /// TSV 转义直写：仅含特殊字符时包引号（语义与原 escape_tsv 一致）。
@@ -74,7 +93,9 @@ fn push_tsv_value(out: &mut String, value: &Value) {
         Value::Null => {}
         Value::String(v) => push_tsv_escaped(out, v),
         Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
-        Value::Number(v) => out.push_str(&v.to_string()),
+        Value::Number(value) => {
+            fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
+        }
         other => push_tsv_escaped(out, &other.to_string()),
     }
 }
@@ -94,16 +115,6 @@ pub(crate) fn escape_csv(value: &str) -> String {
     out
 }
 
-pub(crate) fn value_to_csv_text(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(v) => v.to_string(),
-        Value::Number(v) => v.to_string(),
-        Value::String(v) => v.clone(),
-        other => other.to_string(),
-    }
-}
-
 fn format_csv_value(value: &Value) -> String {
     let mut out = String::new();
     push_csv_value(&mut out, value);
@@ -117,8 +128,7 @@ pub(crate) fn escape_tsv(value: &str) -> String {
     out
 }
 
-pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
-    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>]) {
     for (row_index, row) in rows.iter().enumerate() {
         if row_index > 0 {
             out.push('\n');
@@ -127,9 +137,14 @@ pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
             if cell_index > 0 {
                 out.push('\t');
             }
-            push_tsv_value(&mut out, cell);
+            push_tsv_value(out, cell);
         }
     }
+}
+
+pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
+    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+    push_tsv_rows(&mut out, rows);
     out
 }
 
@@ -144,15 +159,14 @@ pub(crate) fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
         push_tsv_escaped(&mut out, column);
     }
     out.push('\n');
-    out.push_str(&format_tsv_rows(rows));
+    push_tsv_rows(&mut out, rows);
     out
 }
 
 /// Format query-result rows as CSV text without a header row. Database NULLs
 /// use the same empty-cell representation as table-data exports. Used by the
 /// streaming query-result export for batches after the first.
-pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
-    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+fn push_query_result_csv_rows(out: &mut String, rows: &[Vec<Value>]) {
     for (row_index, row) in rows.iter().enumerate() {
         if row_index > 0 {
             out.push('\n');
@@ -161,9 +175,14 @@ pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
             if cell_index > 0 {
                 out.push(',');
             }
-            push_csv_value(&mut out, cell);
+            push_csv_value(out, cell);
         }
     }
+}
+
+pub fn format_query_result_csv_rows(rows: &[Vec<Value>]) -> String {
+    let mut out = String::with_capacity(estimated_rows_capacity(rows));
+    push_query_result_csv_rows(&mut out, rows);
     out
 }
 
@@ -178,7 +197,7 @@ fn format_csv_with_value_formatter(columns: &[String], rows: &[Vec<Value>]) -> S
         push_csv_escaped(&mut out, column);
     }
     out.push('\n');
-    out.push_str(&format_query_result_csv_rows(rows));
+    push_query_result_csv_rows(&mut out, rows);
     out
 }
 
@@ -360,6 +379,23 @@ mod tests {
         for input in ["", "plain", "\"", "\"\"", "a\"b", "\"start", "end\"", "mid\"\"dle", "逗,号\n换行"] {
             let expected = format!("\"{}\"", input.replace('"', "\"\""));
             assert_eq!(super::escape_csv(input), expected, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn push_csv_text_value_preserves_paginated_export_semantics() {
+        let cases = [
+            (serde_json::Value::Null, "\"\""),
+            (serde_json::json!(true), "\"true\""),
+            (serde_json::json!(42.5), "\"42.5\""),
+            (serde_json::json!("a\"b"), "\"a\"\"b\""),
+            (serde_json::json!({"key": "value"}), "\"{\"\"key\"\":\"\"value\"\"}\""),
+        ];
+
+        for (value, expected) in cases {
+            let mut out = String::from("prefix,");
+            super::push_csv_text_value(&mut out, &value);
+            assert_eq!(out, format!("prefix,{expected}"));
         }
     }
 

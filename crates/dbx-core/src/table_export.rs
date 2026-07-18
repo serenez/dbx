@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
 use crate::connection::{config_for_pool_key, task_client_session_id, AppState, PoolKind};
-use crate::csv_export::{format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
+use crate::csv_export::{format_csv, format_tsv, format_tsv_rows, push_csv_text_value};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
@@ -86,7 +86,7 @@ fn format_csv_rows(rows: &[Vec<Value>]) -> String {
             if cell_index > 0 {
                 out.push(',');
             }
-            crate::csv_export::push_csv_escaped(&mut out, &value_to_csv_text(cell));
+            push_csv_text_value(&mut out, cell);
         }
     }
     out

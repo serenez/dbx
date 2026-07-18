@@ -48,6 +48,10 @@ const tableMetadataCoordinator = new MetadataLoadCoordinator((event) => {
   console.debug("[DBX][metadata-load:table-coordinator]", event);
 });
 
+// 失效代数：跨越失效边界的旧加载完成后不得写缓存——结构变更后 force 拉到的
+// 新值可能被保存前启动、最后返回的在途加载回填覆盖
+let tableMetadataInvalidationStamp = 0;
+
 export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog">): MetadataScopeInput {
   return {
     kind: "table-metadata",
@@ -95,6 +99,7 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
   }
 
   logMetadataLoadTrace(request.traceLogger, trace, "cache-miss", { cacheStatus: request.force ? "refresh" : "miss", force: request.force === true });
+  const invalidationStampAtStart = tableMetadataInvalidationStamp;
   const metadata = await tableMetadataCoordinator.run(
     scope,
     async () => {
@@ -116,7 +121,9 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
     { force: request.force, kind: scope.kind },
   );
 
-  tableMetadataCache.set(scope, metadata);
+  if (invalidationStampAtStart === tableMetadataInvalidationStamp) {
+    tableMetadataCache.set(scope, metadata);
+  }
   logMetadataLoadTrace(request.traceLogger, trace, "done", {
     cacheStatus: request.force ? "refresh" : "miss",
     resultCount: metadata.columns.length,
@@ -126,9 +133,15 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
 }
 
 export function invalidateTableMetadataCache(match: MetadataCacheInvalidation): number {
+  tableMetadataInvalidationStamp++;
+  // 同时甩掉在途登记：否则失效后启动的 non-force 调用会加入失效前的旧加载，
+  // 且其失效代数取自失效之后，完成时会把旧结果重新写入缓存
+  tableMetadataCoordinator.clear();
   return tableMetadataCache.invalidate(match);
 }
 
 export function clearTableMetadataCache(): void {
+  tableMetadataInvalidationStamp++;
+  tableMetadataCoordinator.clear();
   tableMetadataCache.clear();
 }

@@ -1,5 +1,6 @@
 import * as api from "@/lib/backend/api";
 import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { isNoSnapshotErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
@@ -7,7 +8,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { TableInfoTab } from "@/types/database";
+import type { ColumnInfo, TableInfoTab } from "@/types/database";
 
 export type NavigationTarget = {
   connectionId: string;
@@ -145,9 +146,19 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       await queryStore.executeTabSql(tabId, emptySql, { pagination: { limit: pageLimit, offset: 0 } });
     }
     try {
-      const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName, target.catalog);
-      const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName, target.catalog).catch(() => []);
-      const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, indexes, targetTableType);
+      // 复用共享表元数据缓存（30s TTL + in-flight 去重）
+      const { metadata } = await loadTableMetadata({
+        connectionId: target.connectionId,
+        database: target.database,
+        schema: querySchema,
+        tableName: target.tableName,
+        tableType: targetTableType,
+        databaseType: effectiveDbType ?? config.db_type,
+        driverProfile: config.driver_profile || config.db_type,
+        catalog: target.catalog,
+      });
+      const columns = metadata.columns;
+      const primaryKeys = metadata.primaryKeys;
       const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, targetTableType);
       queryStore.setTableMeta(tabId, {
         schema: target.schema,
@@ -216,17 +227,40 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
       } catch {}
     }
     queryStore.invalidateTableStructure(context.connectionId, context.database, context.schema, context.tableName);
+    // 结构已变更：无论是否有打开的 data tab 都必须作废共享元数据缓存，否则
+    // 其它 loadTableMetadata 消费者最长 30 秒拿到旧列。不带 schema/catalog
+    // 维度（宁可多废，schema 形态在各消费点可能不同）
+    invalidateTableMetadataCache({ connectionId: context.connectionId, database: context.database, tableName: context.tableName });
     const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.tableMeta.schema || "") === (context.schema || ""));
+    // 同一 catalog 只强制加载一次，结果分发给全部匹配 tab
+    const loadedByCatalog = new Map<string, { columns: ColumnInfo[]; primaryKeys: string[] }>();
     for (const tab of matchingDataTabs) {
       try {
         const connection = connectionStore.getConfig(tab.connectionId);
         const metadataSchema = metadataSchemaForConnection(connection, tab.database, tab.tableMeta?.schema);
-        const columns = await api.getColumns(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName);
-        const indexes = await api.listIndexes(tab.connectionId, tab.database, metadataSchema, tab.tableMeta!.tableName).catch(() => []);
+        // 分组含 tableType：主键计算依赖它，不同 tableType 不能共享加载结果
+        const catalogKey = `${tab.tableMeta?.catalog ?? ""}\u0000${tab.tableMeta?.tableType ?? ""}`;
+        let metadata = loadedByCatalog.get(catalogKey);
+        if (!metadata) {
+          metadata = (
+            await loadTableMetadata({
+              connectionId: tab.connectionId,
+              database: tab.database,
+              schema: metadataSchema,
+              tableName: tab.tableMeta!.tableName,
+              tableType: tab.tableMeta!.tableType,
+              databaseType: effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type ?? "",
+              driverProfile: connection?.driver_profile || connection?.db_type,
+              catalog: tab.tableMeta?.catalog,
+              force: true,
+            })
+          ).metadata;
+          loadedByCatalog.set(catalogKey, metadata);
+        }
         queryStore.setTableMeta(tab.id, {
           ...tab.tableMeta!,
-          columns,
-          primaryKeys: editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(connection), columns, indexes, tab.tableMeta!.tableType),
+          columns: metadata.columns,
+          primaryKeys: metadata.primaryKeys,
         });
         if (tab.id === queryStore.activeTabId) await reloadData();
       } catch (e: any) {

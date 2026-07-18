@@ -4,19 +4,20 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
 import type { QueryTab } from "@/types/database";
 import { useToast } from "@/composables/useToast";
 import { effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { loadTableMetadata, TABLE_METADATA_CACHE_TTL_MS } from "@/lib/metadata/tableMetadataCache";
 import { applyMongoFindSort } from "@/lib/mongo/mongoShellCommand";
 import { uuid } from "@/lib/common/utils";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 
-const DATA_TAB_METADATA_TTL_MS = 30_000;
+const DATA_TAB_METADATA_TTL_MS = TABLE_METADATA_CACHE_TTL_MS;
 
 function visibleQuerySortColumns(columns: string[], hiddenColumnIndexes: number[] | undefined, columnIndex: number): { resultColumns: string[]; columnIndex: number } | undefined {
   const hiddenIndexes = new Set(hiddenColumnIndexes ?? []);
@@ -84,8 +85,19 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const config = connectionStore.getConfig(target.connectionId);
     const querySchema = metadataSchemaForConnection(config, target.database, target.schema);
     console.info("[DBX][reloadData:metadata:get-columns:start]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), schema: querySchema, table: target.tableName });
-    const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName, target.catalog);
-    const indexes = await api.listIndexes(target.connectionId, target.database, querySchema, target.tableName, target.catalog).catch(() => []);
+    // 复用共享表元数据缓存（30s TTL + in-flight 去重），多个入口对同一张表
+    // 不再各自往返 getColumns/listIndexes
+    const { metadata } = await loadTableMetadata({
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: querySchema,
+      tableName: target.tableName,
+      tableType: target.tableType,
+      databaseType: effectiveDatabaseTypeForConnection(config) ?? config?.db_type ?? "",
+      driverProfile: config?.driver_profile || config?.db_type,
+      catalog: target.catalog,
+    });
+    const columns = metadata.columns;
     console.info("[DBX][reloadData:metadata:get-columns:done]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), columnCount: columns.length });
     const current = queryStore.tabs.find((item) => item.id === target.tabId);
     const currentMeta = current ? tableMetaForDataTab(current) : undefined;
@@ -93,7 +105,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       console.info("[DBX][reloadData:metadata:stale-tab]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return;
     }
-    const primaryKeys = editableRowIdentifierColumns(effectiveDatabaseTypeForConnection(config), columns, indexes, target.tableType);
+    const primaryKeys = metadata.primaryKeys;
     queryStore.setTableMeta(target.tabId, {
       catalog: target.catalog,
       schema: target.schema,

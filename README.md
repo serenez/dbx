@@ -45,7 +45,6 @@
     <img src="https://img.shields.io/badge/InfluxDB-d30971?logo=influxdb&logoColor=white" />
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
-    <a href="https://atomgit.com/t8y2/dbx"><img src="https://atomgit.com/t8y2/dbx/star/badge.svg" alt="AtomGit Stars" /></a>
     <a href="https://cnb.cool/dbxio.com/dbx"><img src="https://img.shields.io/badge/CNB-dbx-F76945?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAppJREFUOE9tk01rE1EUhs+5H5lJ0iQT3FRX2Yi4avoLkv4CWxBcNt11oZiuFKGmXQhFN6kuRESSgitXKf6A5g+I6cqFLiKCiptOkraZ5H4cuZOkH9oLw+UO8z7nvGfei3DFohoEQLAKCGWyGJCSbQZsD3ei7r+f45WATV6xmjdISyAlYLaDliveux+ti5ozwLAaFPhIlk6G6f18sxuO7l9bBiWbVoncDGCMWMl++PI/gJ7IohkmD0zkBxT5oRn5LTpN7ULqBByEtFywWvRyHz8Fx3dvN0UwuMPyR0uJFycddH7tKPHZRn7BjnwwkQcUud0HO/K7oOENcTYPRCEAFERmsCpyfZDZfpdnBosOUKGx13BC60QTIdjpmSzrEWDR+UagjsgMciLXAwfhc4MNpKfQtOPE6mVh0gEOaeTXtWXXEdADpJAR/GaZ/rrM9Us82wORPd5zHbRp7JVcyxR5PRP5LTPy6uo0HXIlG9awMgLuEUABkBYI7VLyxs+yyPW3+Nyg4zqoG+UV7TDRlMBbWA/D43u3qlbLGmgRWM2BjFxjQjWQGQBuu4bYYvrm14JMnQSXcjBcny9A5DXIiDJp9/8FWCXAAOaFUEfILTgIcttOvf+2NJnLdI0fBFUyskZKBGTEJEAmBuzr9LCSUDwGQAwwgMzu+m9/VWOAeZSsk+YP48C4li/sRok1nlBd5PogBjgxNw70PfHyqBADyEVXicasZXCVpxYiLfO+HxVZDHCVYwvu2ebPT7fOLNAm65AWLnEAzvsEcOi9/lPU1aACXDfOLdhD9kxNszGdweQGYstqXgItJwDFNxKvwrp57G8h0zVwldHuA0IFt8El83yIs2FSDcpgxDJpUUTwK7gTduN3AK5iG7ehc/E2/gUPD3q3eY4awwAAAABJRU5ErkJggg==" alt="CNB" /></a>
   </p>
 	  <p>
@@ -141,7 +140,7 @@ Dark mode with native title bar sync · 9 editor themes · English, 简体中文
 
 ## AI Agent Integration (MCP)
 
-DBX provides an [MCP server](packages/mcp-server/) that lets AI coding agents query your databases using connections already configured in DBX.
+DBX provides a separate [Rust-powered MCP server](packages/mcp-server/) that lets AI coding agents query databases using connections configured in DBX. The MCP server is distributed independently from the desktop application, so installing DBX does not automatically install the MCP executable.
 
 ```bash
 npx @dbx-app/mcp-server
@@ -177,6 +176,8 @@ For DBX Web or Docker deployments, point the MCP server at the Web backend API. 
 ```
 
 Works with Claude Code, Cursor, Windsurf, and any MCP-compatible agent. Supports listing connections, browsing tables, executing SQL, and opening tables directly in DBX's UI.
+
+Precompiled native binaries are also published for macOS, Linux, and Windows in [package releases](https://github.com/t8y2/dbx/releases?q=packages-v). They run without Node.js and are suitable for offline or server environments. The npm installation uses the same Rust binary through a small Node.js launcher.
 
 DBX also provides a dedicated CLI package for terminal, script, and Codex workflows:
 
@@ -339,6 +340,13 @@ make docs
 
 The official DBX documentation site lives in `docs/`. If you want to improve the website content or documentation pages, edit the files under `docs/` and run `make docs` to preview the site locally.
 
+For clean, reproducible local database instances, use the versioned Docker Compose recipes under [`deploy/database/`](deploy/database/README.md):
+
+```bash
+make db-list
+make db-verify DB=mysql@8.4
+```
+
 JDBC agent driver development projects live in `agents/`:
 
 ```bash
@@ -369,6 +377,7 @@ The installer will be in `src-tauri/target/release/bundle/`.
 ## Documentation
 
 - [Official docs](https://dbxio.com/en/docs/what-is-dbx) — feature guides and tutorials
+- [Database Test Lab](https://dbxio.com/en/docs/database-lab) — local database recipes for development and verification
 - [Contributing](CONTRIBUTING.md) — how to pick up issues and open PRs
 - [Web API reference](docs/content/docs/web-api.mdx) — HTTP API for Docker/Web deployments
 - [Examples](examples/) — CLI, MCP, Docker, and API samples
@@ -408,7 +417,7 @@ Yes. The desktop app works fully offline. For air-gapped driver installs, downlo
 
 <details>
 <summary><strong>How is DBX different from DBeaver / TablePlus / Beekeeper Studio?</strong></summary>
-DBX is 20 MB with no runtime dependencies (no Java, no Python). It includes AI and MCP natively — not as plugins. It supports 60+ databases across desktop, Docker, and web from a single codebase.
+DBX is 20 MB with no runtime dependencies for its native database features (no system Java or Python required). AI is built into the application, while MCP is provided as a separately installed Rust companion package or native binary. It supports 60+ databases across desktop, Docker, and web from a shared Rust core.
 </details>
 
 <details>

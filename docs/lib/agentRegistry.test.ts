@@ -16,11 +16,10 @@ test("offline download catalog includes the JDBC plugin ZIP", () => {
   });
 });
 
-test("release assets expose GitHub, CNB, and AtomGit download links", () => {
+test("release assets expose GitHub and CNB download links", () => {
   assert.deepEqual(downloadLinksFor("https://github.com/t8y2/dbx/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip"), [
     { source: "github", url: "https://github.com/t8y2/dbx/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip" },
     { source: "cnb", url: "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip" },
-    { source: "atomgit", url: "https://atomgit.com/t8y2/dbx/releases/download/agents-latest/dbx-agents-offline-macos-aarch64.zip" },
   ]);
 });
 
@@ -30,7 +29,7 @@ test("non-release assets retain their official download link", () => {
   ]);
 });
 
-test("catalog falls back from GitHub to CNB and then AtomGit", async () => {
+test("catalog falls back from GitHub to CNB", async () => {
   const requestedUrls: string[] = [];
   vi.stubGlobal(
     "fetch",
@@ -38,14 +37,17 @@ test("catalog falls back from GitHub to CNB and then AtomGit", async () => {
       const url = String(input);
       requestedUrls.push(url);
       if (url.includes("api.github.com")) return new Response("rate limited", { status: 403 });
-      if (url.includes("cnb.cool")) throw new TypeError("CORS blocked");
       return Response.json({
-        tag_name: "agents-latest",
-        assets: [
-          { name: "dbx-agent-access.jar", type: "attach" },
-          { name: "dbx-jre-21-macos-aarch64.tar.gz", type: "attach" },
-          { name: "dbx-agents-offline-macos-aarch64.zip", type: "attach" },
-        ],
+        drivers: {
+          access: { jar: { url: "https://dl.dbxio.com/agents/dbx-agent-access.jar", size: 1 } },
+        },
+        jres: {
+          "21": {
+            platforms: {
+              "macos-aarch64": { url: "https://dl.dbxio.com/jres/dbx-jre-21-macos-aarch64.tar.gz", size: 1 },
+            },
+          },
+        },
       });
     }),
   );
@@ -55,7 +57,6 @@ test("catalog falls back from GitHub to CNB and then AtomGit", async () => {
   assert.deepEqual(requestedUrls, [
     "https://api.github.com/repos/t8y2/dbx/releases/tags/agents-latest",
     "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json",
-    "https://api.atomgit.com/api/v5/repos/t8y2/dbx/releases/agents-latest",
   ]);
   assert.equal(catalog?.drivers[0]?.key, "access");
   assert.equal(catalog?.jres[0]?.platformKey, "macos-aarch64");

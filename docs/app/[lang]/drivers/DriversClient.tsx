@@ -37,12 +37,11 @@ const i18n = {
     showing: "Showing",
     of: "of",
     clearSearch: "Clear search",
-    mirrorHint: "CNB and AtomGit mirrors are available for GitHub release assets on mainland China networks.",
+    mirrorHint: "The CNB mirror is available for GitHub release assets on mainland China networks.",
     downloadSources: "Download source",
     sources: {
       github: "GitHub",
       cnb: "CNB",
-      atomgit: "AtomGit",
       official: "Official",
     },
     downloadHint: "For air-gapped environments: download the bundle for your platform on an internet-connected machine, then transfer it to the offline machine and import it in DBX from Settings > Driver Manager. Use the driver and JRE tabs only when you need individual artifacts.",
@@ -77,12 +76,11 @@ const i18n = {
     showing: "显示",
     of: "/",
     clearSearch: "清空搜索",
-    mirrorHint: "中国大陆网络可选择 CNB 或 AtomGit 镜像下载，GitHub Release 资源保持同步。",
+    mirrorHint: "中国大陆网络可选择 CNB 镜像下载，GitHub Release 资源保持同步。",
     downloadSources: "下载来源",
     sources: {
       github: "GitHub",
       cnb: "CNB",
-      atomgit: "AtomGit",
       official: "官方下载",
     },
     downloadHint: "内网环境使用说明：在有网的电脑上下载对应平台的整包，然后传输到内网机器，在 DBX 的“设置 > 驱动管理”中导入。只有需要单个产物时再使用驱动和 JRE 标签页。",
@@ -120,7 +118,7 @@ function DownloadLinks({ url, t }: { url: string; t: DriverTranslations }) {
           key={link.source}
           href={link.url}
           download
-          className={`landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 text-xs font-medium transition-colors hover:border-landing-blue ${link.source === "cnb" || link.source === "atomgit" ? "border-landing-blue/45 bg-landing-blue/10 text-landing-sky" : "border-landing-line"}`}
+          className={`landing-nav-link inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 text-xs font-medium transition-colors hover:border-landing-blue ${link.source === "cnb" ? "border-landing-blue/45 bg-landing-blue/10 text-landing-sky" : "border-landing-line"}`}
           aria-label={`${t.download}: ${t.sources[link.source as DownloadSource]}`}
         >
           <Download size={13} />

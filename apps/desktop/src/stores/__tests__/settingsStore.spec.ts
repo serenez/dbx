@@ -69,9 +69,9 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
   });
 
-  it("preserves mirror update download sources and rejects invalid values", () => {
+  it("preserves CNB, migrates AtomGit to CNB, and rejects invalid values", () => {
     expect(normalizeEditorSettings({ updateDownloadSource: "cnb" }).updateDownloadSource).toBe("cnb");
-    expect(normalizeEditorSettings({ updateDownloadSource: "atomgit" }).updateDownloadSource).toBe("atomgit");
+    expect(normalizeEditorSettings({ updateDownloadSource: "atomgit" as any }).updateDownloadSource).toBe("cnb");
     expect(normalizeEditorSettings({ updateDownloadSource: "mirror" as any }).updateDownloadSource).toBe("official");
   });
 

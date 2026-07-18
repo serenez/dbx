@@ -2932,7 +2932,7 @@ export const useQueryStore = defineStore("query", () => {
         let mongoEditTarget: QueryTab["mongoEditTarget"] | undefined;
 
         for (const parsedCommand of mongoCommands) {
-          const mongoCommand = parsedCommand.command;
+          let mongoCommand = parsedCommand.command;
           const sourceStatement = parsedCommand.text;
           const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + parsedCommand.from, to: options.sourceOffset + parsedCommand.to };
           const commandStartedAt = performance.now();
@@ -2944,6 +2944,9 @@ export const useQueryStore = defineStore("query", () => {
             return annotated;
           };
           try {
+            // The frontend parser remains responsible for editor ranges, while
+            // dbx-core is authoritative for command semantics at execution time.
+            mongoCommand = await api.mongoParseShellCommand(sourceStatement);
             switch (mongoCommand.kind) {
               case "find": {
                 queryExecutionLog("info", "mongo-find:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });

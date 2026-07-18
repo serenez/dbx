@@ -38,7 +38,7 @@ export type DesktopIconTheme = "default" | "black";
 
 export type InterfaceLayout = "separated" | "classic";
 
-export type UpdateDownloadSource = "official" | "cnb" | "atomgit";
+export type UpdateDownloadSource = "official" | "cnb";
 export type SqlSemanticDiagnosticsMode = "auto" | "enabled" | "disabled";
 export type OpenTabsRestoreMode = "all" | "pinned" | "none";
 
@@ -626,7 +626,8 @@ function normalizeTableFontSize(value: unknown): number {
 }
 
 function normalizeUpdateDownloadSource(value: unknown): UpdateDownloadSource {
-  if (value === "atomgit") return "atomgit";
+  // Preserve the intent of users who previously selected the mainland-China mirror.
+  if (value === "atomgit") return "cnb";
   return value === "cnb" ? "cnb" : DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
 }
 
@@ -887,7 +888,12 @@ export const useSettingsStore = defineStore("settings", () => {
     if (isEditorSettingsLoaded.value) return;
     const saved = await api.loadEditorSettings().catch(() => null);
     if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-      editorSettings.value = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      const normalized = normalizeEditorSettings(saved as Partial<EditorSettings>);
+      editorSettings.value = normalized;
+      if ((saved as { updateDownloadSource?: unknown }).updateDownloadSource === "atomgit") {
+        // Persist the channel migration so the removed source cannot reappear in older settings data.
+        await api.saveEditorSettings(normalized).catch(() => {});
+      }
       isEditorSettingsLoaded.value = true;
       return;
     }

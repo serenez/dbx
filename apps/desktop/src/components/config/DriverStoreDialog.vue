@@ -332,7 +332,7 @@ async function forceRefresh() {
 }
 
 function setUpdateDownloadSource(value: unknown) {
-  if (value !== "official" && value !== "cnb" && value !== "atomgit") return;
+  if (value !== "official" && value !== "cnb") return;
   if (value === settingsStore.editorSettings.updateDownloadSource) return;
   settingsStore.updateEditorSettings({ updateDownloadSource: value });
   void forceRefresh().catch(() => undefined);
@@ -1161,7 +1161,6 @@ watch(driverStoreTab, (tab) => {
                   <SelectContent>
                     <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
                     <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
-                    <SelectItem value="atomgit">{{ t("settings.updateDownloadSourceAtomgit") }}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

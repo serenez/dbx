@@ -714,7 +714,7 @@ async fn execute_select_prepared(
         columns.len()
     );
     tokio::pin!(stream);
-    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
     let mut truncated = false;
 
     let rows_start = Instant::now();
@@ -761,7 +761,7 @@ async fn execute_select_text(
 ) -> Result<QueryResult, String> {
     let messages = client.simple_query(sql).await.map_err(pg_error_to_string)?;
     let mut columns: Vec<String> = Vec::new();
-    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
     let mut truncated = false;
 
     for message in messages {

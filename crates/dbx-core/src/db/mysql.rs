@@ -696,10 +696,12 @@ enum MySqlSetupMode {
     Compatible,
 }
 
+const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
+
 impl MySqlSetupMode {
-    fn group_concat_max_len_query(self) -> Option<&'static str> {
+    fn group_concat_max_len_query(self) -> Option<String> {
         match self {
-            Self::Standard => Some("SET SESSION group_concat_max_len = 1048576"),
+            Self::Standard => Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}")),
             Self::Compatible => None,
         }
     }
@@ -745,7 +747,10 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     let lower = error.to_ascii_lowercase();
     let setup_query_rejected =
         lower.contains("1193") || lower.contains("unknown system variable") || lower.contains("syntax error");
-    if lower.contains("group_concat_max_len") && setup_query_rejected {
+    let sphinxql_setup_query_rejected = lower.contains("sphinxql")
+        && lower.contains("only 0 and 1 could be used as boolean values")
+        && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
+    if (lower.contains("group_concat_max_len") && setup_query_rejected) || sphinxql_setup_query_rejected {
         return Some(MySqlSetupMode::Compatible);
     }
 
@@ -791,7 +796,7 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(MYSQL_TCP_KEEPALIVE_MS))
+        .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
@@ -944,7 +949,7 @@ fn mysql_setup_queries_for_database_with_mode(
     // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
     // such as old StarRocks versions that reject unknown MySQL variables.
     if let Some(query) = setup_mode.group_concat_max_len_query() {
-        queries.push(query.to_string());
+        queries.push(query);
     }
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
@@ -2143,6 +2148,7 @@ fn row_to_object(row: &mysql_async::Row, database: &str) -> ObjectInfo {
         name: get_str_by_name(row, "object_name"),
         object_type: get_str_by_name(row, "object_type"),
         schema: Some(database.to_string()),
+        valid: None,
         signature: None,
         comment: get_opt_str(row, "object_comment")
             .map(|s| fix_potential_double_encoding(&s))
@@ -2278,6 +2284,7 @@ pub async fn list_table_objects_show(pool: &MySqlPool, database: &str) -> Result
                 name: table.name,
                 object_type: if table.table_type.eq_ignore_ascii_case("VIEW") { "VIEW" } else { "TABLE" }.to_string(),
                 schema: Some(database.to_string()),
+                valid: None,
                 signature: None,
                 comment: table.comment,
                 created_at: meta.and_then(|meta| meta.created_at.clone()),
@@ -4650,6 +4657,26 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
             Some(MySqlSetupMode::Compatible)
         );
+    }
+
+    #[test]
+    fn mysql_sphinxql_group_concat_boolean_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_sphinxql_boolean_error_retry_stays_scoped_to_group_concat_setup() {
+        for error in [
+            "Server error: sphinxql: only 0 and 1 could be used as boolean values near '42'",
+            "Server error: only 0 and 1 could be used as boolean values near '1048576'",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+        }
     }
 
     #[test]

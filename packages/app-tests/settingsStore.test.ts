@@ -395,6 +395,10 @@ test("AI provider presets include common hosted and local providers", () => {
   assert.equal(AI_PROVIDER_PRESETS.openai.authMethod, "bearer");
   assert.equal(AI_PROVIDER_PRESETS.openai.iconSlug, "openai");
   assert.equal(AI_PROVIDER_PRESETS.deepseek.iconSlug, "deepseek");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].model, "default");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].iconSlug, "claudecode");
+  assert.equal(AI_PROVIDER_PRESETS["claude-code-cli"].requiresApiKey, false);
+  assert.ok(Object.keys(AI_PROVIDER_PRESETS).indexOf("claude-code-cli") < Object.keys(AI_PROVIDER_PRESETS).indexOf("codex-cli"));
 });
 
 test("normalizes legacy AI config and fills provider defaults", () => {
@@ -418,6 +422,32 @@ test("normalizes legacy AI config and fills provider defaults", () => {
 
   const claudeToken = normalizeAiConfig({ provider: "claude", apiKey: "token", authMethod: "bearer" } as any);
   assert.equal(claudeToken.authMethod, "bearer");
+
+  const claudeCode = normalizeAiConfig({
+    provider: "claude-code-cli",
+    claudeCodeCliPath: " /opt/homebrew/bin/claude ",
+    claudeCodeCliEnv: { HTTPS_PROXY: "http://proxy:9800" },
+    reasoningLevel: "xhigh",
+    models: [
+      {
+        name: "claude-sonnet-4-6",
+        label: "Sonnet 4.6",
+        supportedEffortLevels: ["low", "high", "xhigh"],
+      },
+    ],
+  } as any);
+  assert.equal(claudeCode.claudeCodeCliPath, "/opt/homebrew/bin/claude");
+  assert.deepEqual(claudeCode.claudeCodeCliEnv, { HTTPS_PROXY: "http://proxy:9800" });
+  assert.equal(claudeCode.reasoningLevel, "xhigh");
+  assert.deepEqual(claudeCode.models, [
+    {
+      name: "claude-sonnet-4-6",
+      label: "Sonnet 4.6",
+      supportedEffortLevels: ["low", "high", "xhigh"],
+    },
+  ]);
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "max" } as any).reasoningLevel, "max");
+  assert.equal(normalizeAiConfig({ provider: "claude-code-cli", reasoningLevel: "future" } as any).reasoningLevel, "default");
 });
 
 test("infers legacy AI provider from saved endpoint and model", () => {

@@ -771,6 +771,14 @@ describe("buildExecutionCandidates", () => {
     expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
   });
 
+  it("preserves leading optimizer hints in current statement candidates", () => {
+    const hintedSql = "/*+ SET(polar_csi.enable_query on) SET(polar_csi.cost_threshold 0)*/\nselect count(1) from xxx";
+    const sql = `select 1;\n${hintedSql};`;
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "count"), "postgres");
+
+    expect(candidates[0].sql).toBe(hintedSql);
+  });
+
   it("uses the cursor statement for the first candidate when there is no selection", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "users"));

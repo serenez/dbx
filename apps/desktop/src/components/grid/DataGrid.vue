@@ -40,6 +40,9 @@ import {
   WandSparkles,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
@@ -59,12 +62,14 @@ import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
+import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
@@ -93,6 +98,7 @@ import {
   nextKeyboardTransposeState,
   nextTransposeState,
   nextTransposeStateForRecordCount,
+  restoreDataGridAfterTranspose,
   transposeRecordIndexesForMode,
   transposeRecordWidthsForDensity,
   transposeFieldWidth,
@@ -124,8 +130,9 @@ import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowSho
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import { canGoNextDataGridPage } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, restoredDataGridScrollLeft, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
-import { CANVAS_DATA_GRID_ROW_HEIGHT, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { dataGridBottomScrollTop, dataGridScrollPosition, isDataGridAtScrollBottom, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll, type DataGridScrollPosition } from "@/lib/dataGrid/dataGridInfiniteScroll";
+import { CANVAS_DATA_GRID_ROW_HEIGHT, dataGridSearchMatchKey, drawCanvasDataGrid } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { createRowLowerTextCache } from "@/lib/dataGrid/dataGridRowLowerText";
 import { dataGridPreviewLabelKey, dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid/dataGridSaveUi";
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
@@ -168,6 +175,7 @@ import { useDataGridExport } from "@/composables/useDataGridExport";
 import { eventTargetAllowsNativeClipboard, isPlainClipboardShortcut, readTextFromClipboard } from "@/lib/common/clipboard";
 import { claimDataGridPaste, planDataGridPaste } from "@/lib/dataGrid/dataGridClipboard";
 import { DATA_GRID_ROW_NUM_WIDTH, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
 import { useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
@@ -192,6 +200,7 @@ import type { DataGridSortDirection, DataGridSortMode } from "@/lib/dataGrid/dat
 import { DATA_GRID_COMPACT_TOPBAR_WIDTH, type DataGridReloadIntent, type DataGridToolbarActionCapability, type DataGridToolbarAutoRefreshCapability, type DataGridToolbarSaveCapability } from "@/lib/dataGrid/dataGridToolbar";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
+import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -222,6 +231,8 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
+const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
@@ -337,7 +348,6 @@ if (isDebugLoggingEnabled()) {
 
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
-const multiRowTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
 
 watch(
@@ -436,6 +446,10 @@ function headerColumnType(column: string, actualColIdx: number): string {
   });
   return resolved ? shortTypeName(compactHeaderColumnType(resolved)) : "";
 }
+
+const reserveColumnTypeLine = computed(() => reserveDataGridHeaderLine(showColumnTypesInHeader.value, props.result.columns, (column, index) => headerColumnType(column, index)));
+// Match the rendered header columns so comments from unprojected metadata cannot add an empty row.
+const reserveColumnCommentLine = computed(() => reserveDataGridHeaderLine(showColumnCommentsInHeader.value, props.result.columns, (column) => headerColumnComment(column)));
 
 function shortTypeName(t: string): string {
   const s = t.toLowerCase();
@@ -545,7 +559,7 @@ const dataGridSearch = useDataGridSearch({
   columns: () => props.result.columns,
   suggestionColumns: () => props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns,
   rows: () => displayItems.value,
-  getCellText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : formatCellCached(row.data[columnIndex], columnIndex)),
+  getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
   onNavigate: () => nextTick(scrollToCurrentMatch),
 });
 const { searchText, deferredSearchText: deferredClientSearchText, overlayVisible: searchOverlayVisible, currentMatchIndex, suggestions: searchSuggestions, suggestionIndex, matches: searchMatches, matchSet: searchMatchSet, currentMatch: currentSearchMatch } = dataGridSearch;
@@ -1549,11 +1563,6 @@ function onSearchKeydown(e: KeyboardEvent) {
   }
 }
 
-function clearWhereFilterInput() {
-  whereFilterInput.value = "";
-  void applyWhereFilter();
-}
-
 watch(whereFilterInput, () => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
@@ -1666,6 +1675,8 @@ const {
   columnOrderKeys,
   layoutScopeKey: columnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
+  hideNullColumns,
+  onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: refreshGridScrollerMetrics,
 });
 const goToColumnItems = computed(() =>
@@ -1765,12 +1776,31 @@ function scrollToColumnIndex(columnIndex: number) {
 
 // --- Column resize composable ---
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
+const columnWidthCacheKey = computed(() => props.cacheKey?.trim() || undefined);
+const columnStructureSignature = computed(() => createDataGridColumnStructureSignature(props.result.columns, props.result.column_types));
+const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, settingsStore.editorSettings.fontFamily]);
+let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+function measureColumnHeaderText(text: string): number | undefined {
+  if (typeof document === "undefined") return undefined;
+  if (columnHeaderMeasureContext === undefined) columnHeaderMeasureContext = document.createElement("canvas").getContext("2d");
+  if (!columnHeaderMeasureContext) return undefined;
+  // Match the rendered semibold header font instead of estimating proportional glyphs by character count.
+  const fontFamily = getComputedStyle(gridRef.value ?? document.body).fontFamily || "sans-serif";
+  columnHeaderMeasureContext.font = `600 ${tableFontSize.value}px ${fontFamily}`;
+  return Math.ceil(columnHeaderMeasureContext.measureText(text).width);
+}
+
 const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
   density: columnWidthDensity,
   compactColumnHeaderActions,
+  cacheKey: columnWidthCacheKey,
+  columnStructureSignature,
+  measureHeaderText: measureColumnHeaderText,
+  headerMeasurementKey: columnHeaderMeasurementKey,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,
@@ -2229,7 +2259,7 @@ watch(
 );
 
 // --- Pagination ---
-const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
+const pageSize = ref(normalizeResultPageSize(props.context === "table-data" ? (props.pageLimit ?? tableOpenPageLimit()) : settingsStore.editorSettings.pageSize));
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
@@ -2248,6 +2278,8 @@ watch(pageSize, (value) => {
 watch(
   () => settingsStore.editorSettings.pageSize,
   (value) => {
+    // Table-data segments keep their own pagination state instead of following SQL result settings.
+    if (props.context === "table-data") return;
     pageSize.value = normalizeResultPageSize(value, pageSize.value);
   },
 );
@@ -2641,6 +2673,7 @@ const editor = useDataGridEditor({
   pageSize,
   currentPage,
   cacheKey: computed(() => props.cacheKey),
+  onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
   emit,
 });
 
@@ -3029,7 +3062,7 @@ const sortedRows = computed(() => {
     const rows = props.result.rows;
     indices = indices.filter((sourceIndex) => {
       const data = rows[sourceIndex];
-      return data.some((cell, columnIndex) => cell !== null && formatCellCached(cell, columnIndex).toLowerCase().includes(q));
+      return data.some((cell, columnIndex) => cell !== null && rowLowerTextCache.get(data, columnIndex).includes(q));
     });
   }
   return indices;
@@ -3171,7 +3204,7 @@ watch(
 
 function cellIsSearchMatch(displayRow: number, col: number): boolean {
   if (isScrolling.value) return false;
-  return searchMatchSet.value.has(`cell:${displayRow}:${col}`);
+  return searchMatchSet.value.has(dataGridSearchMatchKey(displayRow, col));
 }
 
 function cellIsCurrentMatch(displayRow: number, col: number): boolean {
@@ -3185,7 +3218,7 @@ function cellIsCurrentMatch(displayRow: number, col: number): boolean {
 // maps to the field row header at the field's column index.
 function transposeHeaderIsSearchMatch(fieldIndex: number): boolean {
   if (isScrolling.value) return false;
-  return searchMatchSet.value.has(`column:-1:${fieldIndex}`);
+  return searchMatchSet.value.has(dataGridSearchMatchKey(-1, fieldIndex));
 }
 
 function transposeHeaderIsCurrentMatch(fieldIndex: number): boolean {
@@ -4116,6 +4149,9 @@ const resolvedColumnFormatters = computed(() => props.result.columns.map((_, col
 const columnFormatterSignatures = computed(() => resolvedColumnFormatters.value.map(formatterSignature));
 const primitiveCellFormatCache = new Map<string, string>();
 let objectCellFormatCache = new WeakMap<object, Map<number, string>>();
+// 搜索用小写文本缓存：按行数组身份挂 WeakMap（工作集=当前结果行，GC 回收），
+// 不用固定容量 LRU——搜索是全量顺序扫描，超限修剪会导致第二遍零命中抖动
+const rowLowerTextCache = createRowLowerTextCache(formatCellCached);
 
 function formatterSignature(formatter: ColumnFormatterConfig | undefined): string {
   return formatter ? JSON.stringify(formatter) : "";
@@ -4124,6 +4160,7 @@ function formatterSignature(formatter: ColumnFormatterConfig | undefined): strin
 function clearCellFormatCache() {
   primitiveCellFormatCache.clear();
   objectCellFormatCache = new WeakMap<object, Map<number, string>>();
+  rowLowerTextCache.clear();
 }
 
 function rememberPrimitiveCellFormat(key: string, display: string): string {
@@ -4814,11 +4851,10 @@ function drawCanvasGrid() {
 }
 
 watch(
-  [useCanvasGridRows, hasVisibleRows],
+  [useCanvasGridRows, hasVisibleRows, isErrorResult],
   () => {
-    // When an empty table gets its first pending row, the canvas scroller is created by
-    // the v-if branch after the original mount-time observer attempt has already no-op'd.
-    // Reattach after that branch mounts so the canvas/overlay get real viewport dimensions.
+    // Empty and error surfaces replace the canvas scroller. Reattach after the
+    // normal branch remounts so the canvas/overlay get real viewport dimensions.
     nextTick(attachCanvasResizeObserver);
   },
   { immediate: true },
@@ -6092,7 +6128,8 @@ function scrollTransposeRecordIntoView(rowIndex: number) {
 }
 
 function setMultiRowTranspose(value: boolean) {
-  multiRowTranspose.value = value;
+  if (multiRowTranspose.value === value) return;
+  settingsStore.updateEditorSettings({ dataGridMultiRowTranspose: value });
   if (!showTranspose.value) return;
   nextTick(updateTransposeViewport);
   if (value && transposeRowIndex.value !== null) {
@@ -6280,12 +6317,12 @@ watch(isTransposeMode, (active) => {
   }
 
   nextTick(() => {
-    const scroller = gridScrollerElement();
-    if (!scroller) return;
-    // Transpose mode replaces the normal grid scroller, so restore its state and
-    // reconnect overflow observers only after Vue mounts the new element.
-    scroller.scrollLeft = restoredDataGridScrollLeft(gridScrollLeftBeforeTranspose, scroller.scrollWidth, scroller.clientWidth);
-    refreshGridScrollerMetrics();
+    restoreDataGridAfterTranspose({
+      scroller: gridScrollerElement(),
+      scrollLeftBeforeTranspose: gridScrollLeftBeforeTranspose,
+      attachCanvasResizeObserver,
+      refreshGridScrollerMetrics,
+    });
   });
 });
 
@@ -7366,11 +7403,13 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     <CustomContextMenu :items="gridContextMenuItems" v-slot="{ onContextMenu }">
       <div v-if="hasData || canShowWhereSearch" class="flex-1 flex flex-col overflow-hidden" @contextmenu="onContextMenu">
         <!-- Search bar -->
-        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell shrink-0 flex min-w-0 border-b bg-muted/20">
+        <!-- Leave real vertical space around the 28px controls instead of fitting them against the border. -->
+        <div ref="dataGridTopbarRef" v-if="showDataGridTopbar" class="data-grid-topbar-shell flex h-8 min-w-0 shrink-0 items-center border-b bg-muted/20">
           <div v-if="hasResultToolbarLeadingSlot" class="flex shrink-0 items-center border-r">
             <slot name="result-toolbar-leading" :compact="compactDataGridToolbar" />
           </div>
-          <div class="data-grid-topbar-scroll min-w-0 flex-1 overflow-x-hidden">
+          <!-- Clip both axes instead of creating a hidden scroll container around the toolbar controls. -->
+          <div class="data-grid-topbar-scroll min-w-0 flex-1 overflow-clip">
             <div class="data-grid-topbar flex items-stretch relative" :class="{ 'data-grid-topbar--compact': compactDataGridToolbar }">
               <div v-if="useTransaction && editable && hasDataGridSaveTarget" class="flex items-center px-2 py-0.5 border-r shrink-0">
                 <Select :model-value="rowStatusFilter" @update:model-value="(value: any) => setRowStatusFilter(String(value))">
@@ -7401,6 +7440,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   v-model:order-by-input="orderByInput"
                   v-model:filter-builder-open="filterBuilderOpen"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :condition-columns="props.tableMeta?.columns ?? props.result.columns"
                   :history-scope="conditionHistoryScope"
                   :can-use-where-search="canUseWhereSearch"
                   :compact="compactDataGridToolbar"
@@ -7415,7 +7455,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   :mode-options="filterModeOptions"
                   :column-search="filterBuilderColumnSearch"
                   :apply-where="applyWhereFilter"
-                  :clear-where="clearWhereFilterInput"
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
                   @update:column-search="filterBuilderColumnSearch = $event"
@@ -7763,6 +7802,8 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     :tooltip-disabled="columnHeaderTooltipsDisabled"
                     :column-type="headerColumnType(col.name, col.actualColIdx)"
                     :column-comment="headerColumnComment(col.name)"
+                    :show-type-line="reserveColumnTypeLine"
+                    :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"
                     :tooltip-column-comment="columnCommentMap.get(col.name)"
                     :type-class="typeColorClass(headerColumnType(col.name, col.actualColIdx))"
@@ -8472,6 +8513,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
                     <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
+                    <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8498,6 +8540,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                     </td>
                     <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground">{{ column.data_type }}</td>
                     <td class="px-3 py-2">{{ column.is_nullable ? "YES" : "NO" }}</td>
+                    <td data-table-info-column-default class="max-w-56 px-3 py-2 font-mono text-[11px]" :class="{ 'text-muted-foreground/70': column.column_default == null }" :title="column.column_default ?? undefined">
+                      <span class="block max-w-56 truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
+                    </td>
                   </tr>
                 </tbody>
               </table>

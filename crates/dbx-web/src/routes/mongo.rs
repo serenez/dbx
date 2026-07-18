@@ -8,6 +8,18 @@ use serde::Deserialize;
 use crate::error::AppError;
 use crate::state::WebState;
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoParseShellCommandRequest {
+    source: String,
+}
+
+pub async fn parse_shell_command(
+    Json(req): Json<MongoParseShellCommandRequest>,
+) -> Result<Json<dbx_core::mongo_shell::MongoCommand>, AppError> {
+    dbx_core::mongo_shell::parse(&req.source).map(Json).map_err(AppError)
+}
+
 async fn run_cancellable<T, F>(state: &Arc<WebState>, execution_id: Option<String>, future: F) -> Result<T, AppError>
 where
     F: Future<Output = Result<T, String>>,
@@ -128,6 +140,7 @@ pub struct MongoAggregateRequest {
     pub pipeline_json: String,
     pub max_rows: Option<usize>,
     pub execution_id: Option<String>,
+    pub options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +452,7 @@ pub async fn aggregate_documents(
             &req.collection,
             &req.pipeline_json,
             req.max_rows,
+            req.options_json.as_deref(),
         ),
     )
     .await?;

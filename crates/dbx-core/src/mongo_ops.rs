@@ -245,12 +245,13 @@ pub async fn mongo_aggregate_documents_core(
     collection: &str,
     pipeline_json: &str,
     max_rows: Option<usize>,
+    options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => {
-            mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows).await
+            mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support aggregate".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),

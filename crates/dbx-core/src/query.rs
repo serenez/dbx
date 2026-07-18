@@ -34,6 +34,10 @@ use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
+/// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
+/// Wording must match packages/mongo-shell `MONGO_SHELL_COMMAND_HINT`
+/// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
+const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
     "SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.";
 #[cfg(feature = "duckdb-bundled")]
@@ -1487,7 +1491,7 @@ pub async fn do_execute(
             result
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
-        PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
+        PoolKind::MongoDb(_) => Err(MONGO_SHELL_COMMAND_HINT.to_string()),
         PoolKind::MessageQueue => Err("Use Message Queue-specific commands".to_string()),
         PoolKind::Nacos => Err("Use Nacos-specific commands".to_string()),
         PoolKind::InfluxDb(client) => {
@@ -1712,7 +1716,7 @@ pub async fn execute_sql_statement_with_options(
     // (e.g. typos) must be rejected before any pool/key creation so that
     // session-scoped pools do not leak MongoDB Clients and SSH tunnels.
     if connection_is_mongodb(state, connection_id).await {
-        return Err("Use MongoDB-specific commands".to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
     let db_type = connection_database_type(state, connection_id).await;
@@ -1934,7 +1938,7 @@ pub async fn execute_multi_core_with_options_for_client(
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
-        return Err("Use MongoDB-specific commands".to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
     let pool_key = if database.is_empty() {
@@ -3163,6 +3167,7 @@ where
                 Ok(stmt) => {
                     let column_types: Vec<String> =
                         stmt.columns().iter().map(|column| column.type_().name().to_string()).collect();
+                    let column_classes = db::postgres::classify_pg_column_types(&column_types);
                     let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
                     match conn.query_raw(&stmt, params).await {
                         Ok(stream) => {
@@ -3175,10 +3180,13 @@ where
                                     Ok(row) => {
                                         let values = (0..row.columns().len())
                                             .map(|index| {
-                                                db::postgres::pg_value_to_json(
+                                                db::postgres::pg_value_to_json_classified(
                                                     &row,
                                                     index,
-                                                    column_types.get(index).map(String::as_str).unwrap_or(""),
+                                                    column_classes
+                                                        .get(index)
+                                                        .copied()
+                                                        .unwrap_or(db::postgres::PgColType::Other),
                                                 )
                                             })
                                             .collect();
@@ -3335,6 +3343,7 @@ async fn execute_manual_txn_postgres_statement(
         let stmt = conn.prepare_cached(sql).await.map_err(|e| format!("Prepare failed: {e}"))?;
         let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
         let column_types: Vec<String> = stmt.columns().iter().map(|c| c.type_().name().to_string()).collect();
+        let column_classes = db::postgres::classify_pg_column_types(&column_types);
         let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
         let stream = conn.query_raw(&stmt, params).await.map_err(|e| format!("Query failed: {e}"))?;
         tokio::pin!(stream);
@@ -3347,7 +3356,13 @@ async fn execute_manual_txn_postgres_statement(
             }
             let row = row_result.map_err(|e| format!("Query failed: {e}"))?;
             let values: Vec<serde_json::Value> = (0..row.columns().len())
-                .map(|i| db::postgres::pg_value_to_json(&row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
+                .map(|i| {
+                    db::postgres::pg_value_to_json_classified(
+                        &row,
+                        i,
+                        column_classes.get(i).copied().unwrap_or(db::postgres::PgColType::Other),
+                    )
+                })
                 .collect();
             data.push(values);
         }

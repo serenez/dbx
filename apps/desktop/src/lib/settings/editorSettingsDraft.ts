@@ -21,6 +21,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "appLayout",
+  "tabLayout",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
   "compactColumnHeaderActions",

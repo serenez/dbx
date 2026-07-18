@@ -1330,6 +1330,7 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             object_type: row.get::<&str, _>(1).unwrap_or("TABLE").to_string(),
             schema: Some(schema.to_string()),
+            valid: None,
             signature: None,
             comment: row.get::<&str, _>(4).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
             created_at: row.get::<chrono::NaiveDateTime, _>(2).map(|value| value.to_string()),
@@ -1835,12 +1836,35 @@ fn sqlserver_batch_can_use_execute(sql: &str) -> bool {
 
 fn sqlserver_batch_may_return_result_set(sql: &str) -> bool {
     let tokens = top_level_sqlserver_tokens(sql);
-    tokens.iter().any(|token| matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "WITH" | "TABLE"))
+    let starts_with_cte_dml = tokens.first().is_some_and(|token| token.text == "WITH")
+        && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE"))
+        && crate::sql::split_sql_statements(sql).len() == 1;
+    tokens.iter().any(|token| {
+        matches!(token.text.as_str(), "SELECT" | "EXEC" | "EXECUTE" | "TABLE")
+            || (token.text == "WITH" && !starts_with_cte_dml)
+    })
 }
 
 fn sqlserver_dml_output_returns_rows(sql: &str) -> bool {
-    starts_with_executable_sql_keyword(sql, &["INSERT", "UPDATE", "DELETE", "MERGE"])
-        && first_sql_tokens(sql, 64).iter().any(|token| token.eq_ignore_ascii_case("OUTPUT"))
+    crate::sql::split_sql_statements(sql).iter().any(|statement| {
+        let tokens = top_level_sqlserver_tokens(statement);
+        let contains_dml = starts_with_executable_sql_keyword(statement, &["INSERT", "UPDATE", "DELETE", "MERGE"])
+            || (tokens.first().is_some_and(|token| token.text == "WITH")
+                && tokens.iter().any(|token| matches!(token.text.as_str(), "INSERT" | "UPDATE" | "DELETE" | "MERGE")));
+        if !contains_dml {
+            return false;
+        }
+
+        tokens.iter().enumerate().any(|(output_index, token)| {
+            if token.text != "OUTPUT" || (token.start > 0 && statement.as_bytes()[token.start - 1] == b'@') {
+                return false;
+            }
+
+            // SQL Server may combine OUTPUT ... INTO with a second OUTPUT clause.
+            // Only an OUTPUT whose rows are not routed before the next clause reaches the client.
+            !tokens[output_index + 1..].iter().take_while(|next| next.text != "OUTPUT").any(|next| next.text == "INTO")
+        })
+    })
 }
 
 fn contains_transaction_control(sql: &str) -> bool {
@@ -2066,6 +2090,69 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_cte_dml_batches_use_execute_for_affected_rows() {
+        assert!(sqlserver_batch_can_use_execute(
+            ";WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH a AS (SELECT 1 AS id), b AS (SELECT id FROM a) DELETE dbo.users FROM dbo.users JOIN b ON b.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET active = 0;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users WITH (ROWLOCK) SET note = 'SELECT OUTPUT' /* WITH SELECT OUTPUT */;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = @output WHERE id = 1;"
+        ));
+
+        assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
+        assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte);"));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte) UNION (SELECT 2);"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) (SELECT id FROM cte); UPDATE dbo.users SET active = 0;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute("WITH XMLNAMESPACES ('urn:demo' AS ns) SELECT 1 AS id;"));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) DELETE dbo.users OUTPUT deleted.id FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) DELETE dbo.users OUTPUT deleted.id INTO dbo.audit_ids FROM dbo.users JOIN cte ON cte.id = users.id;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id INTO dbo.audit_ids;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH source AS (SELECT 1 AS id) MERGE dbo.users AS target USING source ON target.id = source.id WHEN MATCHED THEN UPDATE SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids OUTPUT inserted.id;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0; SELECT 1;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids; SELECT 1;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "WITH cte AS (SELECT 1 AS id) INSERT INTO dbo.users(id) SELECT id FROM cte;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute("RESTORE HEADERONLY FROM DISK = 'backup.bak' WITH FILE = 1;"));
+        assert!(sqlserver_batch_can_use_execute(
+            "DECLARE @output INT = 1; UPDATE dbo.users SET active = @output WHERE id = 1;"
+        ));
+    }
+
+    #[test]
     fn sqlserver_transaction_batches_keep_simple_query_path() {
         assert!(!sqlserver_batch_can_use_execute("BEGIN TRANSACTION\nUPDATE dbo.users SET active = 0 WHERE id = 1;"));
         assert!(!sqlserver_batch_can_use_execute("UPDATE dbo.users SET active = 0 WHERE id = 1;\nCOMMIT;"));
@@ -2093,6 +2180,18 @@ mod tests {
         ));
         assert!(!sqlserver_batch_can_use_execute("WITH cte AS (SELECT 1 AS id) SELECT * FROM cte;"));
         assert!(!sqlserver_batch_can_use_execute("UPDATE dbo.users SET active = 0 OUTPUT inserted.id WHERE id = 1;"));
+        assert!(sqlserver_batch_can_use_execute(
+            "UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "DELETE FROM dbo.users OUTPUT deleted.id INTO @audit_ids WHERE id = 1;"
+        ));
+        assert!(sqlserver_batch_can_use_execute(
+            "MERGE dbo.users AS target USING dbo.source AS source ON target.id = source.id WHEN MATCHED THEN DELETE OUTPUT deleted.id INTO dbo.audit_ids;"
+        ));
+        assert!(!sqlserver_batch_can_use_execute(
+            "UPDATE dbo.users SET active = 0 OUTPUT inserted.id INTO dbo.audit_ids OUTPUT inserted.id WHERE id = 1;"
+        ));
         assert!(sqlserver_batch_can_use_execute(
             "DECLARE @id INT = 1; UPDATE dbo.users SET active = 0 WHERE id = @id;"
         ));

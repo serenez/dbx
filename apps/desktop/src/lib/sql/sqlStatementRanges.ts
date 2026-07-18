@@ -282,6 +282,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let statementStart = -1;
   let statementEnd = -1;
   let statementHitStart = 0;
+  let pendingHintStart = -1;
   let customDelimiter: string | null = null;
   let state: QuoteState = "none";
   let dollarTag = "";
@@ -290,13 +291,17 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
 
   const markContent = (pos: number) => {
-    if (statementStart === -1) statementStart = pos;
+    if (statementStart === -1) {
+      statementStart = pendingHintStart === -1 ? pos : pendingHintStart;
+      pendingHintStart = -1;
+    }
     statementEnd = pos + 1;
   };
 
   const flush = (to = statementEnd) => {
     if (statementStart === -1) {
       statementEnd = -1;
+      pendingHintStart = -1;
       return;
     }
     const trimmedTo = trimRangeEnd(sql, statementStart, to);
@@ -305,6 +310,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
     statementStart = -1;
     statementEnd = -1;
+    pendingHintStart = -1;
   };
 
   while (i < len) {
@@ -418,6 +424,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
     // Block comments consume until the closing */.
     if (ch === "/" && next === "*") {
+      if (statementStart === -1 && pendingHintStart === -1 && sql[i + 2] === "+") pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
       i = close === -1 ? len : close + 2;
       continue;

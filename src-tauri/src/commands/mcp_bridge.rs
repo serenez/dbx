@@ -96,6 +96,7 @@ struct MongoAggregateDocumentsRequest {
     collection: String,
     pipeline_json: String,
     max_rows: Option<usize>,
+    options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -664,6 +665,7 @@ async fn handle_mongo_aggregate_documents_data(state: &Arc<AppState>, body: &str
         &req.collection,
         &req.pipeline_json,
         req.max_rows,
+        req.options_json.as_deref(),
     )
     .await
     {

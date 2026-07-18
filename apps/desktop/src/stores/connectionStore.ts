@@ -205,6 +205,7 @@ export type TreeClipboard =
 
 interface LoadTreeOptions {
   force?: boolean;
+  connectedOnly?: boolean;
   expectedSidebarSearchQuery?: string;
   searchFilter?: string;
   sidebarTableSearchParentId?: string;
@@ -351,6 +352,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const cancelledLocalConnectionAttempts = new Map<string, Set<number>>();
   const successfulLocalConnectionAttempts = new Map<string, number>();
   const connectionStateRevisions = new Map<string, number>();
+  const connectionErrorRevisions = new Map<string, number>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
   let initFromDiskPromise: Promise<void> | null = null;
@@ -374,7 +376,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     logMetadataLoadTrace(metadataTraceLogger, trace, "cache-miss", { cacheStatus: options?.force ? "refresh" : "miss", force: options?.force === true });
+    const errorRevision = connectionErrorRevision(scope.connectionId);
     const result = await load();
+    clearConnectionErrorIfUnchanged(scope.connectionId, errorRevision);
     metadataListPageCache.set(scope, result);
     logMetadataLoadTrace(metadataTraceLogger, trace, "done", {
       cacheStatus: options?.force ? "refresh" : "miss",
@@ -609,6 +613,22 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function setConnectionError(connectionId: string, message: string) {
     connectionErrors.value[connectionId] = message;
+    connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
+  }
+
+  function updateConnectionErrorPresentation(connectionId: string, expectedMessage: string, message: string) {
+    // Hints decorate the current error event and must not invalidate a retry's recovery revision.
+    if (connectionErrors.value[connectionId] !== expectedMessage) return;
+    connectionErrors.value[connectionId] = message;
+  }
+
+  function connectionErrorRevision(connectionId?: string | null): number {
+    return connectionId ? (connectionErrorRevisions.get(connectionId) ?? 0) : 0;
+  }
+
+  function clearConnectionErrorIfUnchanged(connectionId: string | null | undefined, revision: number) {
+    if (!connectionId || connectionErrorRevision(connectionId) !== revision) return;
+    clearConnectionError(connectionId);
   }
 
   function agentDriverUpdateHint(): string {
@@ -640,19 +660,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     const message = connectionErrorWithDriverUpdateHint(config, baseMessage);
     if (message !== baseMessage) {
-      setConnectionError(connectionId, message);
+      updateConnectionErrorPresentation(connectionId, baseMessage, message);
       return;
     }
     void refreshAgentDriversForErrorHint().then(() => {
       if (connectionErrors.value[connectionId] !== baseMessage) return;
       const refreshedMessage = connectionErrorWithDriverUpdateHint(config, baseMessage);
-      if (refreshedMessage !== baseMessage) setConnectionError(connectionId, refreshedMessage);
+      if (refreshedMessage !== baseMessage) updateConnectionErrorPresentation(connectionId, baseMessage, refreshedMessage);
     });
   }
 
   function clearConnectionError(connectionId: string) {
     if (!connectionErrors.value[connectionId]) return;
     delete connectionErrors.value[connectionId];
+    connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
   }
 
   function markConnectionHealthChecked(connectionId: string) {
@@ -702,9 +723,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function withMetadataLoadTimeout<T>(connectionId: string, promise: Promise<T>, label: string): Promise<T> {
     const timeoutMs = metadataLoadTimeoutMs(getConfig(connectionId));
+    const errorRevision = connectionErrorRevision(connectionId);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([
+      const result = await Promise.race([
         promise,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
@@ -712,6 +734,8 @@ export const useConnectionStore = defineStore("connection", () => {
           }, timeoutMs);
         }),
       ]);
+      clearConnectionErrorIfUnchanged(connectionId, errorRevision);
+      return result;
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -1752,6 +1776,7 @@ export const useConnectionStore = defineStore("connection", () => {
     persistPinnedTreeNodeIds();
     for (const id of removedIds) {
       clearConnectionError(id);
+      connectionErrorRevisions.delete(id);
       connectedIds.value.delete(id);
       clearConnectionIdentifierQuote(id);
       clearConnectionHealthCheck(id);
@@ -1811,7 +1836,9 @@ export const useConnectionStore = defineStore("connection", () => {
     const nextConnections = [...connections.value];
     nextConnections[index] = { ...nextConnections[index], database_info: normalized };
     connections.value = nextConnections;
-    rebuildTreeNodes();
+    // Database info is reactive connection metadata, not tree structure. Keep
+    // navigator node identities stable so an in-flight first expansion can
+    // still apply its loaded children after this background refresh completes.
   }
 
   async function refreshConnectedDatabaseInfo(connectionId: string, config: ConnectionConfig): Promise<void> {
@@ -1935,7 +1962,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const existing = connections.value[idx].visible_schemas;
     let nextSchemas: Record<string, string[]> | undefined;
     if (schemaNames) {
-      nextSchemas = { ...(existing || {}), [database]: schemaNames };
+      nextSchemas = { ...existing, [database]: schemaNames };
     } else if (existing) {
       nextSchemas = { ...existing };
       delete nextSchemas[database];
@@ -2225,7 +2252,11 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!node) return;
         node.isLoading = true;
         try {
-          await ensureConnected(connectionId);
+          if (options?.connectedOnly) {
+            if (!connectedIds.value.has(connectionId)) return;
+          } else {
+            await ensureConnected(connectionId);
+          }
           if (useCachedChildren(node, options)) return;
 
           const config = getConfig(connectionId);
@@ -2364,6 +2395,25 @@ export const useConnectionStore = defineStore("connection", () => {
       },
       options,
     );
+  }
+
+  async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
+    if (!connectedIds.value.has(connectionId)) return;
+    const config = getConfig(connectionId);
+    if (!config || ["redis", "etcd", "zookeeper", "mongodb", "elasticsearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
+    const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
+    if (metadataLoadCoordinator.has(scope)) return;
+
+    const wasExpanded = !!node.isExpanded;
+    node.isLoading = true;
+    try {
+      await loadDatabases(connectionId, { connectedOnly: true });
+    } finally {
+      node.isExpanded = wasExpanded;
+      node.isLoading = false;
+    }
   }
 
   async function loadRedisDatabases(connectionId: string) {
@@ -2795,7 +2845,7 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const schemas = sortSidebarSchemaInfos(await api.listSchemaInfos(connectionId, database));
+          const schemas = sortSidebarSchemaInfos(await withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database), "schemas"));
           const visibleSchemaNames = new Set(
             filterSchemaNamesForConnection(
               schemas.map((schema) => schema.name),
@@ -5367,6 +5417,7 @@ export const useConnectionStore = defineStore("connection", () => {
     disconnect,
     closeDatabaseConnection,
     ensureConnected,
+    loadConnectedConnectionRootForSidebarSearch,
     isTreeNodeChildrenLoaded,
     releaseCollapsedTreeNodeChildren,
     setBeforeConnectHandler,

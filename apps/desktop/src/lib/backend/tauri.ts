@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -41,8 +42,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
-import type { AiConfigItem } from "@/types/ai";
+import type { AiConfig, AiConfigItem, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -336,6 +336,7 @@ export interface AiCompletionRequest {
 export interface AiModelInfo {
   id: string;
   displayName?: string;
+  supportedEffortLevels?: AiEffortLevel[];
 }
 
 export async function aiComplete(request: AiCompletionRequest): Promise<string> {
@@ -611,6 +612,10 @@ export async function readExternalSqlFile(path: string): Promise<string> {
 
 export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
   return invoke("write_external_sql_file", { path, content });
+}
+
+export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<string | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content });
 }
 
 export interface SqlFileEntry {
@@ -897,13 +902,8 @@ export async function buildCreateUserSql(username: string, password: string, tab
 }
 
 export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string): Promise<string | undefined> {
-  try {
-    const result = await invoke<string>("get_explain_info", { connectionId, database, schema, sql, mode });
-    return result;
-  } catch (e: any) {
-    console.error("[getExplainInfo] invoke failed:", e?.message || e);
-    return undefined;
-  }
+  // Preserve Agent/driver errors so the explain view can show the actionable cause.
+  return invoke<string>("get_explain_info", { connectionId, database, schema, sql, mode });
 }
 
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
@@ -1407,7 +1407,7 @@ export interface UpdateInfo {
   release_notes: string;
 }
 
-export type UpdateDownloadSource = "official" | "cnb" | "atomgit";
+export type UpdateDownloadSource = "official" | "cnb";
 
 export interface UpdateDownloadProgress {
   downloaded: number;
@@ -1859,6 +1859,11 @@ export async function mongoFindOne(connectionId: string, database: string, colle
   return invoke("mongo_find_one", { connectionId, database, collection, filter, projection, options, executionId });
 }
 
+export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
+  const raw = await invoke<Record<string, unknown>>("mongo_parse_shell_command", { source });
+  return normalizeRustMongoCommand(raw);
+}
+
 export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
   return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
@@ -1907,8 +1912,8 @@ export async function mongoServerVersion(connectionId: string, database: string,
   return invoke("mongo_server_version", { connectionId, database, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
-  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, optionsJson?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, optionsJson, executionId });
 }
 
 export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {

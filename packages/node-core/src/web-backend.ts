@@ -264,6 +264,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
           collection: aggregate.collection,
           pipelineJson: aggregate.pipeline,
           maxRows: options?.maxRows ?? 100,
+          ...(aggregate.options ? { optionsJson: aggregate.options } : {}),
         }),
       });
       const result = (await res.json()) as { documents: unknown[]; total: number };
@@ -327,7 +328,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.aggregate([]), db.projects.aggregate([], {explain:true}), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
   }
   const res = await apiFetch("/api/query/execute", {

@@ -95,6 +95,8 @@ export interface UseDataGridEditorOptions {
   pageSize: Ref<number>;
   currentPage: Ref<number>;
   cacheKey?: ComputedRef<string | undefined>;
+  /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
+  onResultPayloadMutated?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
   };
@@ -1214,6 +1216,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
       customHandler.applySavedChanges?.({ dirtyRows: snapshot.dirtyRows, columns: result.value.columns });
       applyDirtyRowsToResult(snapshot);
+      options.onResultPayloadMutated?.();
       clearSavedPendingChanges(snapshot);
       if (!hasPendingChanges.value) exitTransaction();
       clearPendingChangeHistory();
@@ -1308,6 +1311,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       console.warn("[DBX] failed to record data grid history", e);
     }
     applyDirtyRowsToResult(snapshot);
+    options.onResultPayloadMutated?.();
     snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();

@@ -201,6 +201,7 @@ type objectInfo struct {
 	ObjectType string  `json:"object_type"`
 	Schema     string  `json:"schema"`
 	Comment    *string `json:"comment"`
+	Valid      *bool   `json:"valid,omitempty"`
 }
 
 type metadataListConstraints struct {
@@ -1258,9 +1259,14 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
+		var valid any
 		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment); err != nil {
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &valid); err != nil {
 			return nil, err
+		}
+		if valid != nil {
+			value := truthy(valid)
+			item.Valid = &value
 		}
 		result = append(result, item)
 	}
@@ -1311,19 +1317,58 @@ WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
 func xuguListObjectsQuery(schema string, constraints metadataListConstraints) xuguMetadataListQuery {
 	return xuguConstrainedMetadataListQuery(
 		`
-SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS
+SELECT t.TABLE_NAME AS OBJECT_NAME, 'TABLE' AS OBJECT_TYPE, t.COMMENTS, NULL AS VALID
 FROM ALL_TABLES t
 JOIN ALL_SCHEMAS s ON s.DB_ID = t.DB_ID AND s.SCHEMA_ID = t.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
 UNION ALL
-SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS
+SELECT v.VIEW_NAME AS OBJECT_NAME, 'VIEW' AS OBJECT_TYPE, v.COMMENTS, NULL AS VALID
 FROM ALL_VIEWS v
 JOIN ALL_SCHEMAS s ON s.DB_ID = v.DB_ID AND s.SCHEMA_ID = v.SCHEMA_ID
-WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)`,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PROC_NAME AS OBJECT_NAME,
+       CASE WHEN p.RET_TYPE IS NULL THEN 'PROCEDURE' ELSE 'FUNCTION' END AS OBJECT_TYPE,
+       p.COMMENTS, p.VALID
+FROM ALL_PROCEDURES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE' AS OBJECT_TYPE, p.COMMENTS, p.VALID
+FROM ALL_PACKAGES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT p.PACK_NAME AS OBJECT_NAME, 'PACKAGE_BODY' AS OBJECT_TYPE, p.COMMENTS, p.ALL_OK
+FROM ALL_PACKAGES p
+JOIN ALL_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND p.BODY IS NOT NULL
+UNION ALL
+SELECT tr.TRIG_NAME AS OBJECT_NAME, 'TRIGGER' AS OBJECT_TYPE, tr.COMMENTS, tr.VALID
+FROM ALL_TRIGGERS tr
+JOIN ALL_SCHEMAS s ON s.DB_ID = tr.DB_ID AND s.SCHEMA_ID = tr.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT q.SEQ_NAME AS OBJECT_NAME, 'SEQUENCE' AS OBJECT_TYPE, NULL AS COMMENTS, NULL AS VALID
+FROM ALL_SEQUENCES q
+JOIN ALL_SCHEMAS s ON s.DB_ID = q.DB_ID AND s.SCHEMA_ID = q.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+UNION ALL
+SELECT u.TYPE_NAME AS OBJECT_NAME, 'TYPE_BODY' AS OBJECT_TYPE, u.COMMENTS, u.VALID
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?)
+  AND u.BODY IS NOT NULL`,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, VALID",
 		"OBJECT_NAME",
 		"OBJECT_TYPE",
-		[]any{schema, schema},
+		[]any{schema, schema, schema, schema, schema, schema, schema, schema, schema},
 		constraints,
 	)
 }
@@ -1388,6 +1433,8 @@ func normalizedXuguObjectTypes(values []string) []string {
 			normalized = "TABLE"
 		case "VIEW":
 			normalized = "VIEW"
+		case "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY":
+			// Already normalized.
 		default:
 			continue
 		}
@@ -1653,7 +1700,13 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		builder.WriteString(line)
 	}
-	return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}, rows.Err()
+	result := map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": builder.String()}
+	normalizedType := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(objectType), "_", " "))
+	if normalizedType == "TYPE" || normalizedType == "TYPE BODY" {
+		// Type source is exposed as catalog SPEC/BODY text, but cannot be safely edited as DDL.
+		result["editable"] = false
+	}
+	return result, rows.Err()
 }
 
 func (s *server) getTableDDL(schema, table string) (string, error) {
@@ -2121,12 +2174,31 @@ SELECT TO_CHAR(p.DEFINE)
 FROM SYS_PROCEDURES p
 JOIN SYS_SCHEMAS s ON s.DB_ID = p.DB_ID AND s.SCHEMA_ID = p.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(p.PROC_NAME) = UPPER(?)`, []any{schema, name}, nil
-	case "PACKAGE", "PACKAGE BODY":
+	case "PACKAGE":
 		return `
-SELECT COALESCE(TO_CHAR(k.SPEC), '') || COALESCE(TO_CHAR(k.BODY), '')
+SELECT COALESCE(TO_CHAR(k.SPEC), '')
 FROM SYS_PACKAGES k
 JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
 WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "PACKAGE BODY", "PACKAGE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(k.BODY), '')
+FROM SYS_PACKAGES k
+JOIN SYS_SCHEMAS s ON s.DB_ID = k.DB_ID AND s.SCHEMA_ID = k.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(k.PACK_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE":
+		return `
+SELECT COALESCE(TO_CHAR(u.SPEC), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)`, []any{schema, name}, nil
+	case "TYPE BODY", "TYPE_BODY":
+		return `
+SELECT COALESCE(TO_CHAR(u.BODY), '')
+FROM ALL_TYPES u
+JOIN ALL_SCHEMAS s ON s.DB_ID = u.DB_ID AND s.SCHEMA_ID = u.SCHEMA_ID
+WHERE UPPER(s.SCHEMA_NAME) = UPPER(?) AND UPPER(u.TYPE_NAME) = UPPER(?)
+  AND u.BODY IS NOT NULL`, []any{schema, name}, nil
 	default:
 		return "", nil, fmt.Errorf("object source is not supported for %s", objectType)
 	}

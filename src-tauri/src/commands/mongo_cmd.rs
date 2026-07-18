@@ -5,6 +5,11 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::mongo_driver::MongoDocumentResult;
 
+#[tauri::command]
+pub fn mongo_parse_shell_command(source: String) -> Result<dbx_core::mongo_shell::MongoCommand, String> {
+    dbx_core::mongo_shell::parse(&source)
+}
+
 async fn run_cancellable<T, F>(state: &Arc<AppState>, execution_id: Option<String>, future: F) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>>,
@@ -203,6 +208,7 @@ pub async fn mongo_aggregate_documents(
     collection: String,
     pipeline_json: String,
     max_rows: Option<usize>,
+    options_json: Option<String>,
     execution_id: Option<String>,
 ) -> Result<MongoDocumentResult, String> {
     let app = state.inner().clone();
@@ -216,6 +222,7 @@ pub async fn mongo_aggregate_documents(
             &collection,
             &pipeline_json,
             max_rows,
+            options_json.as_deref(),
         ),
     )
     .await

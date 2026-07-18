@@ -1074,6 +1074,8 @@ mod tests {
                 context_window: None,
                 codex_cli_path: None,
                 codex_cli_env: Default::default(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: Default::default(),
             },
         }
     }

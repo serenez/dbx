@@ -1,7 +1,14 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "codex-cli" | "custom";
+export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "ollama" | "openai-compatible" | "claude-code-cli" | "codex-cli" | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
-export type AiReasoningLevel = "default" | "minimal" | "low" | "medium" | "high";
+export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type AiReasoningLevel = "default" | "minimal" | AiEffortLevel;
+
+export interface AiConfiguredModel {
+  name: string;
+  label?: string;
+  supportedEffortLevels?: AiEffortLevel[];
+}
 
 export interface AiConfig {
   provider: AiProvider;
@@ -9,7 +16,7 @@ export interface AiConfig {
   authMethod: AiAuthMethod;
   endpoint: string;
   model: string;
-  models?: Array<{ name: string; label?: string }>;
+  models?: AiConfiguredModel[];
   apiStyle: AiApiStyle;
   proxyEnabled?: boolean;
   proxyUrl?: string;
@@ -18,6 +25,8 @@ export interface AiConfig {
   contextWindow?: number;
   codexCliPath?: string | null;
   codexCliEnv?: Record<string, string>;
+  claudeCodeCliPath?: string | null;
+  claudeCodeCliEnv?: Record<string, string>;
 }
 
 export interface AiTestConnectionResult {

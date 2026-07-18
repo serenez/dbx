@@ -3752,7 +3752,9 @@ mod tests {
 
     // ---- AI Config tests ----
 
-    use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem, AiProvider, AiReasoningLevel};
+    use crate::ai::{
+        AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem, AiEffortLevel, AiModelListItem, AiProvider, AiReasoningLevel,
+    };
 
     fn make_ai_config(name: &str, is_default: bool) -> AiConfigItem {
         AiConfigItem {
@@ -3774,6 +3776,8 @@ mod tests {
                 context_window: None,
                 codex_cli_path: None,
                 codex_cli_env: std::collections::HashMap::new(),
+                claude_code_cli_path: None,
+                claude_code_cli_env: std::collections::HashMap::new(),
             },
         }
     }
@@ -3783,7 +3787,15 @@ mod tests {
         let db = temp_db_path("ai-roundtrip");
         let storage = Storage::open(&db).await.unwrap();
 
-        let cfg = make_ai_config("test-config", true);
+        let mut cfg = make_ai_config("test-config", true);
+        cfg.config.provider = AiProvider::ClaudeCodeCli;
+        cfg.config.model = "claude-sonnet-4-6".to_string();
+        cfg.config.reasoning_level = AiReasoningLevel::Xhigh;
+        cfg.config.models = vec![AiModelListItem {
+            name: "claude-sonnet-4-6".to_string(),
+            label: Some("Sonnet 4.6".to_string()),
+            supported_effort_levels: vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh],
+        }];
         storage.save_ai_config_item(&cfg).await.unwrap();
 
         let loaded = storage.load_ai_configs().await.unwrap();
@@ -3791,7 +3803,14 @@ mod tests {
         assert_eq!(loaded[0].id, "cfg-test-config");
         assert_eq!(loaded[0].name, "test-config");
         assert!(loaded[0].is_default);
-        assert_eq!(loaded[0].config.model, "gpt-4o");
+        assert_eq!(loaded[0].config.model, "claude-sonnet-4-6");
+        assert_eq!(loaded[0].config.reasoning_level, AiReasoningLevel::Xhigh);
+        assert_eq!(loaded[0].config.models.len(), 1);
+        assert_eq!(loaded[0].config.models[0].name, "claude-sonnet-4-6");
+        assert_eq!(
+            loaded[0].config.models[0].supported_effort_levels,
+            vec![AiEffortLevel::Low, AiEffortLevel::High, AiEffortLevel::Xhigh]
+        );
 
         std::fs::remove_file(&db).ok();
     }

@@ -41,6 +41,64 @@ describe("useDataGridConditionEditor", () => {
     expect(value.value).toBe("status = customer_name");
   });
 
+  it("reuses column comments for field suggestions without adding them to history", async () => {
+    const scope = { connectionId: "connection", database: "db", tableName: "users" };
+    rememberDataGridConditionHistory("where", scope, "customer_id = 1");
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind: "where",
+      value,
+      columns: [
+        { name: "customer_id", comment: "客户编号" },
+        { name: "customer_name", comment: null },
+      ],
+      historyScope: scope,
+    });
+
+    value.value = "cust";
+    await nextTick();
+    await vi.waitFor(() =>
+      expect(editor.suggestions.value).toEqual([
+        { value: "customer_id", kind: "column", comment: "客户编号" },
+        { value: "customer_name", kind: "column" },
+      ]),
+    );
+
+    value.value = "customer";
+    editor.dismiss();
+    editor.openHistory();
+    expect(editor.suggestions.value).toEqual([{ value: "customer_id = 1", kind: "history" }]);
+  });
+
+  it.each(["where", "orderBy"] as const)("normalizes %s comments from different metadata providers", async (kind) => {
+    const value = ref("");
+    const editor = useDataGridConditionEditor({
+      kind,
+      value,
+      columns: [
+        "customer_plain",
+        { name: "customer_native", comment: "  原生注释  " },
+        { name: "customer_jdbc", comment: "JDBC remarks" },
+        { name: "customer_null", comment: null },
+        { name: "customer_blank", comment: " \n\t " },
+        { name: "customer_invalid", comment: 42 } as unknown as { name: string; comment: string },
+      ],
+      historyScope: {},
+    });
+
+    value.value = "cust";
+    await nextTick();
+    await vi.waitFor(() => expect(editor.suggestions.value).toHaveLength(6));
+    expect(editor.suggestions.value).toEqual([
+      { value: "customer_plain", kind: "column" },
+      { value: "customer_native", kind: "column", comment: "原生注释" },
+      { value: "customer_jdbc", kind: "column", comment: "JDBC remarks" },
+      { value: "customer_null", kind: "column" },
+      { value: "customer_blank", kind: "column" },
+      { value: "customer_invalid", kind: "column" },
+    ]);
+  });
+
   it("ignores stale asynchronous suggestion responses", async () => {
     vi.useFakeTimers();
     const value = ref("");

@@ -17,6 +17,12 @@ async function main() {
 
   const client = new CnbClient(args);
   const release = await client.ensureRelease(tag, githubRelease);
+
+  if (args.metadataOnly) {
+    console.log(`Updated CNB release metadata for ${tag}.`);
+    return;
+  }
+
   const existingAssets = new Set((release.assets || []).map((asset) => asset.name));
   const assets = localAssets(args.assetsDir).filter((assetPath) => {
     const name = basename(assetPath);
@@ -42,17 +48,21 @@ function parseArgs(argv) {
     overwriteExisting: false,
     githubReleasePath: "",
     assetsDir: "",
+    metadataOnly: false,
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--github-release") args.githubReleasePath = argv[++index];
     else if (arg === "--assets-dir") args.assetsDir = argv[++index];
+    else if (arg === "--metadata-only") args.metadataOnly = true;
     else if (arg === "--overwrite-existing") args.overwriteExisting = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
   if (!args.token) throw new Error("CNB_TOKEN is required.");
-  if (!args.githubReleasePath || !args.assetsDir) {
-    throw new Error("Usage: sync-cnb-release.mjs --github-release <release.json> --assets-dir <dir>");
+  if (!args.githubReleasePath || (!args.metadataOnly && !args.assetsDir)) {
+    throw new Error(
+      "Usage: sync-cnb-release.mjs --github-release <release.json> (--assets-dir <dir> | --metadata-only)",
+    );
   }
   if (!Number.isInteger(args.concurrency) || args.concurrency < 1) {
     throw new Error("CNB_UPLOAD_CONCURRENCY must be a positive integer.");
@@ -99,6 +109,7 @@ export class CnbClient {
     await this.request("PATCH", `/${this.repository}/-/releases/${existing.id}`, {
       name: payload.name,
       body: payload.body,
+      prerelease: payload.prerelease,
     });
     return existing;
   }

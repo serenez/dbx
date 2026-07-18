@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
-import { useDataGridConditionEditor, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
-import { getDataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
+import { useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
 const props = withDefaults(
   defineProps<{
     kind: DataGridConditionHistoryKind;
-    columns?: readonly string[];
+    columns?: readonly DataGridConditionColumnOption[];
     historyScope: DataGridConditionHistoryScope;
     placeholder?: string;
     ariaLabel?: string;
@@ -44,7 +44,7 @@ const overlayRef = ref<HTMLTextAreaElement>();
 const controlRef = ref<HTMLDivElement>();
 const dropdownRef = ref<HTMLDivElement>();
 const expanded = ref(false);
-const expandedRect = ref({ left: 0, top: 0, width: 0 });
+const expandedRect = ref({ left: 0, top: 0, width: 0, controlsTop: 0, inputTop: 0, prefix: 0, suffix: 28 });
 const expandedHeight = ref(56);
 const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
@@ -64,12 +64,17 @@ const activeEditor = computed(() => overlayRef.value ?? inputRef.value);
 const hasValue = computed(() => modelValue.value.trim().length > 0);
 const emptyHistoryText = computed(() => (modelValue.value.trim() ? props.historyNoMatchesText : props.historyEmptyText));
 const activeSuggestionId = computed(() => (editor.highlightedIndex.value >= 0 ? `${suggestionListId}-${editor.highlightedIndex.value}` : undefined));
+const suggestionPreferredWidth = computed(() => getDataGridConditionSuggestionPreferredWidth(editor.suggestions.value));
 const suggestionStyle = computed<CSSProperties>(() => ({
   left: `${suggestionPosition.value.left}px`,
   top: `${suggestionPosition.value.top}px`,
   width: `${suggestionPosition.value.width}px`,
 }));
 const overlayStyle = computed<CSSProperties>(() => ({
+  "--data-grid-condition-controls-top": `${expandedRect.value.controlsTop}px`,
+  "--data-grid-condition-input-top": `${expandedRect.value.inputTop}px`,
+  "--data-grid-condition-prefix-indent": `${expandedRect.value.prefix}px`,
+  "--data-grid-condition-suffix-width": `${expandedRect.value.suffix}px`,
   left: `${expandedRect.value.left}px`,
   top: `${expandedRect.value.top}px`,
   width: `${expandedRect.value.width}px`,
@@ -108,11 +113,32 @@ function measureExpandedHeight(input: HTMLTextAreaElement) {
   return Math.min(Math.max(56, lineHeight * 2.5, contentHeight), Math.min(260, availableHeight));
 }
 
+function measureExpandedRect(input: HTMLTextAreaElement) {
+  const inputRect = input.getBoundingClientRect();
+  const control = controlRef.value;
+  const controlRect = control?.getBoundingClientRect() ?? inputRect;
+  const controlsRect = control?.firstElementChild?.getBoundingClientRect() ?? controlRect;
+  const horizontalInset = 8;
+  return {
+    left: controlRect.left - horizontalInset,
+    top: controlRect.top,
+    width: controlRect.width + horizontalInset * 2,
+    controlsTop: Math.max(0, controlsRect.top - controlRect.top),
+    inputTop: Math.max(0, inputRect.top - controlRect.top),
+    prefix: Math.max(0, inputRect.left - controlRect.left),
+    suffix: Math.max(28, controlRect.right - inputRect.right),
+  };
+}
+
 function updateSuggestionPosition() {
   void nextTick(() => {
     const target = activeEditor.value;
     if (!target) return;
-    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), { viewportWidth: window.innerWidth });
+    suggestionPosition.value = getDataGridConditionSuggestionPosition(target.getBoundingClientRect(), {
+      viewportWidth: window.innerWidth,
+      preferredWidth: suggestionPreferredWidth.value,
+      maxWidth: suggestionPreferredWidth.value === undefined ? undefined : 520,
+    });
   });
 }
 
@@ -123,7 +149,7 @@ function resizeEditor(forceExpand = false) {
     const focused = document.activeElement === input || document.activeElement === overlayRef.value;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
-      expandedRect.value = input.getBoundingClientRect();
+      expandedRect.value = measureExpandedRect(input);
       expandedHeight.value = measureExpandedHeight(input);
     }
     expanded.value = nextExpanded;
@@ -234,6 +260,9 @@ function hideHistoryPreview() {
 }
 
 watch(modelValue, () => resizeEditor());
+watch(suggestionPreferredWidth, () => {
+  if (editor.dropdownOpen.value) updateSuggestionPosition();
+});
 watch(
   () => editor.dropdownOpen.value,
   (open) => {
@@ -357,7 +386,10 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           "
           @mouseleave="hideHistoryPreview"
         >
-          <span data-condition-history-text class="min-w-0 flex-1 truncate font-mono">{{ suggestion.value }}</span>
+          <span data-condition-history-text class="data-grid-condition-suggestion-field min-w-0 truncate" :class="suggestion.comment ? 'max-w-[75%] shrink-0' : 'flex-1'" :title="suggestion.value">
+            {{ suggestion.value }}
+          </span>
+          <span v-if="suggestion.comment" class="ml-3 min-w-0 flex-1 truncate text-right text-muted-foreground" :title="suggestion.comment">{{ suggestion.comment }}</span>
           <button v-if="suggestion.kind === 'history'" type="button" class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" @mousedown.stop.prevent="editor.deleteHistory(suggestion.value)">
             <X class="h-3 w-3" />
           </button>
@@ -418,6 +450,16 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   transform: translateX(-4px);
 }
 
+.data-grid-topbar-condition-input,
+.data-grid-condition-suggestion-field {
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
+}
+
 .data-grid-topbar-condition-input {
   width: 100%;
   max-width: 100%;
@@ -430,13 +472,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   border-radius: 0;
   appearance: none;
   scrollbar-width: none;
-  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
-  font-size: 0.875rem;
   line-height: 1.5rem;
-  font-variant-ligatures: none;
-  font-feature-settings:
-    "liga" 0,
-    "calt" 0;
 }
 
 :global(.dark) .data-grid-topbar-condition-input {

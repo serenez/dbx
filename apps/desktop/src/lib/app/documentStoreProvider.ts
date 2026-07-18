@@ -18,6 +18,19 @@ export type DocumentFilterRule = {
   elasticsearchQueryType?: ElasticsearchQueryType;
 };
 
+export type DocumentFieldPathKind = "scalar" | "object" | "array" | "array-object" | "mixed";
+
+export type DocumentFieldPathNode = {
+  key: string;
+  path: string;
+  label: string;
+  displayPath: string;
+  kind: DocumentFieldPathKind;
+  selectable: boolean;
+  sampleValue?: unknown;
+  children: DocumentFieldPathNode[];
+};
+
 export type DocumentStoreQueryPreviewOptions = {
   collection: string;
   filterJson?: string;
@@ -119,6 +132,152 @@ export function documentFilterModeNeedsValue(mode: DocumentFilterMode): boolean 
   return mode !== "is-null" && mode !== "is-not-null";
 }
 
+type DocumentFieldPathAccumulatorNode = {
+  key: string;
+  path: string;
+  kind: DocumentFieldPathKind;
+  sampleValue?: unknown;
+  children: DocumentFieldPathAccumulatorNode[];
+  childByKey: Map<string, DocumentFieldPathAccumulatorNode>;
+};
+
+export function documentFieldPathOptionsFromDocuments(documents: readonly Record<string, unknown>[]): string[] {
+  return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
+}
+
+export function documentFieldPathTreeFromDocuments(documents: readonly Record<string, unknown>[]): DocumentFieldPathNode[] {
+  if (documents.length === 0) return [];
+  const rootNodes: DocumentFieldPathAccumulatorNode[] = [];
+  const rootByKey = new Map<string, DocumentFieldPathAccumulatorNode>();
+  ensureDocumentFieldPathNode(rootNodes, rootByKey, "_id", "_id", "scalar");
+
+  for (const doc of documents) {
+    for (const [key, value] of Object.entries(doc)) {
+      if (key === "_id") continue;
+      collectDocumentFieldPathNode(rootNodes, rootByKey, key, value);
+    }
+  }
+  return finalizeDocumentFieldPathNodes(rootNodes);
+}
+
+export function flattenDocumentFieldPathTree(nodes: readonly DocumentFieldPathNode[]): DocumentFieldPathNode[] {
+  const flattened: DocumentFieldPathNode[] = [];
+  for (const node of nodes) {
+    flattened.push(node);
+    flattened.push(...flattenDocumentFieldPathTree(node.children));
+  }
+  return flattened;
+}
+
+export function searchDocumentFieldPathTree(nodes: readonly DocumentFieldPathNode[], query: string): DocumentFieldPathNode[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return flattenDocumentFieldPathTree(nodes);
+  return flattenDocumentFieldPathTree(nodes).filter((node) => {
+    return node.path.toLowerCase().includes(normalizedQuery) || node.displayPath.toLowerCase().includes(normalizedQuery) || node.label.toLowerCase().includes(normalizedQuery);
+  });
+}
+
+export function arrayObjectAncestorPathForDocumentField(nodes: readonly DocumentFieldPathNode[], path: string): string | null {
+  for (const node of nodes) {
+    if (node.path === path) return null;
+    if (path.startsWith(`${node.path}.`)) {
+      if (node.kind === "array-object") return node.path;
+      return arrayObjectAncestorPathForDocumentField(node.children, path);
+    }
+  }
+  return null;
+}
+
+function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, path: string, value: unknown, depth = 0): void {
+  const key = path.split(".").pop() || path;
+  const node = ensureDocumentFieldPathNode(nodes, byKey, key, path, documentFieldPathKindFromValue(value));
+  if (node.sampleValue === undefined) node.sampleValue = value;
+  if (depth >= 6) return;
+  if (isBsonExtendedJsonWrapper(value)) return;
+  if (Array.isArray(value)) {
+    collectArrayDocumentFieldPathNodes(node, value, depth + 1);
+    return;
+  }
+  if (isPlainRecord(value)) collectNestedDocumentFieldPathNodes(node, value, depth + 1);
+}
+
+function collectArrayDocumentFieldPathNodes(parent: DocumentFieldPathAccumulatorNode, values: readonly unknown[], depth: number): void {
+  if (depth > 6) return;
+  for (const value of values) {
+    if (Array.isArray(value)) collectArrayDocumentFieldPathNodes(parent, value, depth + 1);
+    else if (isPlainRecord(value) && !isBsonExtendedJsonWrapper(value)) collectNestedDocumentFieldPathNodes(parent, value, depth);
+  }
+}
+
+function collectNestedDocumentFieldPathNodes(parent: DocumentFieldPathAccumulatorNode, value: Record<string, unknown>, depth: number): void {
+  for (const [key, nestedValue] of Object.entries(value)) {
+    collectDocumentFieldPathNode(parent.children, parent.childByKey, `${parent.path}.${key}`, nestedValue, depth);
+  }
+}
+
+function ensureDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, key: string, path: string, kind: DocumentFieldPathKind): DocumentFieldPathAccumulatorNode {
+  const existing = byKey.get(key);
+  if (existing) {
+    existing.kind = mergeDocumentFieldPathKind(existing.kind, kind);
+    return existing;
+  }
+  const node: DocumentFieldPathAccumulatorNode = {
+    key,
+    path,
+    kind,
+    children: [],
+    childByKey: new Map(),
+  };
+  byKey.set(key, node);
+  nodes.push(node);
+  return node;
+}
+
+function documentFieldPathKindFromValue(value: unknown): DocumentFieldPathKind {
+  if (isBsonExtendedJsonWrapper(value)) return "scalar";
+  if (Array.isArray(value)) return arrayContainsPlainRecord(value) ? "array-object" : "array";
+  if (isPlainRecord(value)) return "object";
+  return "scalar";
+}
+
+const BSON_EXTENDED_JSON_SINGLE_KEY_WRAPPERS = new Set(["$oid", "$numberInt", "$numberLong", "$numberDouble", "$numberDecimal", "$date", "$timestamp", "$binary", "$regularExpression", "$code", "$symbol", "$undefined", "$minKey", "$maxKey", "$dbPointer"]);
+
+function isBsonExtendedJsonWrapper(value: unknown): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  if (keys.length === 1) return BSON_EXTENDED_JSON_SINGLE_KEY_WRAPPERS.has(keys[0]);
+  return (keys.length === 2 && keys.includes("$binary") && keys.includes("$type")) || (keys.length === 2 && keys.includes("$code") && keys.includes("$scope")) || (keys.length === 2 && keys.includes("$dbPointer") && keys.includes("$ref"));
+}
+
+function arrayContainsPlainRecord(values: readonly unknown[]): boolean {
+  return values.some((value) => (isPlainRecord(value) && !isBsonExtendedJsonWrapper(value)) || (Array.isArray(value) && arrayContainsPlainRecord(value)));
+}
+
+function mergeDocumentFieldPathKind(current: DocumentFieldPathKind, next: DocumentFieldPathKind): DocumentFieldPathKind {
+  if (current === next) return current;
+  if (current === "mixed" || next === "mixed") return "mixed";
+  if ((current === "array-object" && next === "array") || (current === "array" && next === "array-object")) return "array-object";
+  return "mixed";
+}
+
+function finalizeDocumentFieldPathNodes(nodes: readonly DocumentFieldPathAccumulatorNode[], parentDisplaySegments: readonly string[] = []): DocumentFieldPathNode[] {
+  return nodes.map((node) => {
+    const label = node.kind === "array" || node.kind === "array-object" ? `${node.key}[]` : node.key;
+    const displaySegments = [...parentDisplaySegments, label];
+    return {
+      key: node.key,
+      path: node.path,
+      label,
+      displayPath: displaySegments.join(" > "),
+      kind: node.kind,
+      selectable: true,
+      sampleValue: node.sampleValue,
+      children: finalizeDocumentFieldPathNodes(node.children, displaySegments),
+    };
+  });
+}
+
 export function elasticsearchQueryTypeNeedsValue(queryType: ElasticsearchQueryType | undefined): boolean {
   return queryType !== "exists";
 }
@@ -183,6 +342,7 @@ export function elasticsearchStructuredFilter(query: Record<string, unknown> | n
 
 type DocumentFilterParseOptions = {
   kind?: DocumentStoreKind;
+  sampleValue?: unknown;
 };
 
 export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: DocumentFilterParseOptions = {}): Record<string, unknown> | null {
@@ -196,9 +356,9 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
     case "not-equals":
       return { [rule.fieldName]: { $ne: value } };
     case "like":
-      return { [rule.fieldName]: { $regex: textValue, $options: "i" } };
+      return { [rule.fieldName]: { $regex: escapeRegexLiteral(textValue), $options: "i" } };
     case "not-like":
-      return { [rule.fieldName]: { $not: { $regex: textValue, $options: "i" } } };
+      return { [rule.fieldName]: { $not: { $regex: escapeRegexLiteral(textValue), $options: "i" } } };
     case "greater-than":
       return { [rule.fieldName]: { $gt: value } };
     case "less-than":
@@ -210,14 +370,68 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
   }
 }
 
-export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[]): Record<string, unknown> | null {
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null> = []): Record<string, unknown> | null {
   if (conditions.length === 0) return null;
-  let result = conditions[0];
-  for (let i = 1; i < conditions.length; i++) {
-    const operator = rules[i]?.conjunction === "OR" ? "$or" : "$and";
-    result = { [operator]: [result, conditions[i]] };
+  const grouped = groupLeadingArrayObjectConditions(conditions, rules, arrayObjectParents);
+  let result = grouped.conditions[0];
+  for (let i = 1; i < grouped.conditions.length; i++) {
+    const operator = grouped.rules[i]?.conjunction === "OR" ? "$or" : "$and";
+    result = { [operator]: [result, grouped.conditions[i]] };
   }
   return result;
+}
+
+function groupLeadingArrayObjectConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null>): { conditions: Record<string, unknown>[]; rules: Pick<DocumentFilterRule, "conjunction">[] } {
+  const groupedConditions: Record<string, unknown>[] = [];
+  const groupedRules: Pick<DocumentFilterRule, "conjunction">[] = [];
+  let index = 0;
+
+  // A later AND after an OR is part of the left-associated expression produced below,
+  // so only the prefix before the first OR can be safely collapsed into $elemMatch.
+  while (index < conditions.length && (index === 0 || rules[index]?.conjunction !== "OR")) {
+    const parent = arrayObjectParents[index];
+    if (!parent) {
+      groupedConditions.push(conditions[index]);
+      groupedRules.push(rules[index]);
+      index++;
+      continue;
+    }
+
+    const elementConditions: Record<string, unknown>[] = [];
+    let end = index;
+    while (end < conditions.length && (end === index || rules[end]?.conjunction === "AND") && arrayObjectParents[end] === parent) {
+      const relative = relativeArrayObjectCondition(conditions[end], parent);
+      if (!relative) break;
+      elementConditions.push(relative);
+      end++;
+    }
+    if (elementConditions.length < 2) {
+      groupedConditions.push(conditions[index]);
+      groupedRules.push(rules[index]);
+      index++;
+      continue;
+    }
+    groupedConditions.push({ [parent]: { $elemMatch: { $and: elementConditions } } });
+    groupedRules.push(rules[index]);
+    index = end;
+  }
+
+  return {
+    conditions: [...groupedConditions, ...conditions.slice(index)],
+    rules: [...groupedRules, ...rules.slice(index)],
+  };
+}
+
+function relativeArrayObjectCondition(condition: Record<string, unknown>, parent: string): Record<string, unknown> | null {
+  const entries = Object.entries(condition);
+  if (entries.length !== 1) return null;
+  const [field, value] = entries[0];
+  const prefix = `${parent}.`;
+  return field.startsWith(prefix) ? { [field.slice(prefix.length)]: value } : null;
 }
 
 const MAX_SAFE_BIGINT = 9007199254740991n;
@@ -333,14 +547,49 @@ export function currentDocumentSortJson(input: string): string | undefined {
   return Object.keys(sort).length ? JSON.stringify(sort) : undefined;
 }
 
+export function formatDocumentQueryInput(input: string, kind?: DocumentStoreKind): string {
+  const parsed = parseDocumentFilterInput(input, { kind });
+  return JSON.stringify(parsed, null, 2);
+}
+
 function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptions = {}): unknown {
   const trimmed = raw.trim();
   if (!trimmed) return "";
   try {
     return parseJsonPreservingLargeIntegers(trimmed, options);
   } catch {
-    return trimmed;
+    return mongoTypedFilterValue(trimmed, options);
   }
+}
+
+function mongoTypedFilterValue(raw: string, options: DocumentFilterParseOptions): unknown {
+  if (options.kind !== "mongodb") return raw;
+  const sampleValue = mongoTypedFilterSample(options.sampleValue);
+  if (!sampleValue) return raw;
+  if (typeof sampleValue.$oid === "string") return { $oid: raw };
+  if ("$date" in sampleValue) return { $date: raw };
+  if (typeof sampleValue.$numberLong === "string" && /^-?\d+$/.test(raw)) return { $numberLong: raw };
+  return raw;
+}
+
+function mongoTypedFilterSample(sampleValue: unknown): Record<string, unknown> | null {
+  if (isPlainRecord(sampleValue)) return sampleValue;
+  if (!Array.isArray(sampleValue)) return null;
+
+  const samples = sampleValue.filter((value) => value !== null && value !== undefined);
+  if (!samples.length || samples.some((value) => !isPlainRecord(value))) return null;
+  const records = samples as Record<string, unknown>[];
+  const sampleKind = mongoTypedFilterSampleKind(records[0]);
+  // Mixed arrays are ambiguous, so infer a BSON type only from homogeneous scalar wrappers.
+  if (!sampleKind || records.some((value) => mongoTypedFilterSampleKind(value) !== sampleKind)) return null;
+  return records[0];
+}
+
+function mongoTypedFilterSampleKind(sampleValue: Record<string, unknown>): "$oid" | "$date" | "$numberLong" | null {
+  if (typeof sampleValue.$oid === "string") return "$oid";
+  if ("$date" in sampleValue) return "$date";
+  if (typeof sampleValue.$numberLong === "string") return "$numberLong";
+  return null;
 }
 
 export function elasticsearchSearchBodyFromDocumentQuery(options: Pick<DocumentStoreQueryPreviewOptions, "filterJson" | "sortJson" | "skip" | "limit">): Record<string, unknown> {

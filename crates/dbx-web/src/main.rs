@@ -19,6 +19,15 @@ use dbx_core::connection::AppState;
 use dbx_core::storage::Storage;
 use state::WebState;
 use tokio::sync::RwLock;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+use tower_http::compression::CompressionLayer;
+
+const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+fn web_compression_predicate() -> impl Predicate {
+    // XLSX exports are already compressed ZIP archives, so gzip would only add CPU overhead.
+    DefaultPredicate::new().and(NotForContentType::const_new(XLSX_CONTENT_TYPE))
+}
 
 fn web_body_limit_bytes() -> usize {
     const DEFAULT_MB: usize = 1024;
@@ -59,7 +68,24 @@ fn normalize_public_base_path(value: Option<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_public_base_path, web_agent_dir_from_env};
+    use super::{normalize_public_base_path, web_agent_dir_from_env, web_compression_predicate, XLSX_CONTENT_TYPE};
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::Response;
+    use tower_http::compression::predicate::Predicate;
+
+    fn compression_response(content_type: &str) -> Response<Body> {
+        Response::builder().header(CONTENT_TYPE, content_type).body(Body::from(vec![b'x'; 64])).unwrap()
+    }
+
+    #[test]
+    fn web_compression_skips_streams_and_precompressed_exports() {
+        let predicate = web_compression_predicate();
+
+        assert!(predicate.should_compress(&compression_response("application/json")));
+        assert!(!predicate.should_compress(&compression_response("text/event-stream")));
+        assert!(!predicate.should_compress(&compression_response(XLSX_CONTENT_TYPE)));
+    }
 
     #[test]
     fn normalize_public_base_path_defaults_to_root() {
@@ -482,6 +508,7 @@ async fn main() {
         .route("/document-store/update-document", post(routes::document_store::update_document))
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
+        .route("/mongo/parse-shell-command", post(routes::mongo::parse_shell_command))
         .route("/mongo/find-one", post(routes::mongo::find_one))
         .route("/mongo/count-documents", post(routes::mongo::count_documents))
         .route("/mongo/server-version", post(routes::mongo::server_version))
@@ -611,6 +638,7 @@ async fn main() {
     let mut app = Router::new()
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
+        .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     // Static file serving

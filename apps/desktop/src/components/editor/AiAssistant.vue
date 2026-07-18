@@ -54,6 +54,8 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import { buildAiContext, runAgentStream, isVectorDbType, isValidActionForMode, defaultActionForMode, type AiAction, type AiAssistantMode, type AiSqlFileContext } from "@/lib/ai/ai";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
@@ -229,12 +231,14 @@ const modelSearchQuery = ref("");
 
 // Configured providers for quick switching - get from aiConfigs
 const configuredProviders = computed(() => {
-  const providers = settings.aiConfigs.filter((c) => {
-    // Check directly if config has required fields
-    const preset = AI_PROVIDER_PRESETS[c.provider];
-    if (c.provider === "codex-cli") return true;
-    return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
-  });
+  const providers = orderAiConfigsForDisplay(
+    settings.aiConfigs.filter((c) => {
+      // Check directly if config has required fields
+      const preset = AI_PROVIDER_PRESETS[c.provider];
+      if (c.provider === "codex-cli" || c.provider === "claude-code-cli") return true;
+      return !!c.endpoint?.trim() && !!c.model?.trim() && (!preset.requiresApiKey || !!c.apiKey?.trim());
+    }),
+  );
   // Apply search filter - hide providers with no matching models
   if (modelSearchQuery.value.trim()) {
     const query = modelSearchQuery.value.trim().toLowerCase();
@@ -250,7 +254,15 @@ const activeFullConfig = computed(() => {
   if (!settings.activeModel) return null;
   const item = settings.aiConfigs.find((c) => c.id === settings.activeModel!.configId);
   if (!item) return null;
-  return normalizeAiConfig({ ...item, model: settings.activeModel!.modelId });
+  const modelId = settings.activeModel.modelId;
+  const config = normalizeAiConfig({ ...item, model: modelId });
+  if (config.provider === "claude-code-cli") {
+    config.reasoningLevel = normalizeClaudeCodeReasoningLevel(
+      config.reasoningLevel,
+      item.models?.find((model) => model.name === modelId),
+    );
+  }
+  return config;
 });
 
 function getModelsForConfig(configId: string): string[] {
@@ -1602,10 +1614,6 @@ async function deleteConversation(id: string) {
 function startNewChat() {
   clearMessages();
   showConversationList.value = false;
-  const defaultConfig = settings.aiConfigs.find((c) => c.isDefault) || settings.aiConfigs[0];
-  if (defaultConfig) {
-    settings.updateActiveModel({ configId: defaultConfig.id, modelId: defaultConfig.model });
-  }
 }
 
 onMounted(async () => {

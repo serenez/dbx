@@ -37,6 +37,7 @@ import type {
   SshConfigHostEntry,
   TunnelProfile,
 } from "@/types/database";
+import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -810,12 +811,8 @@ export async function buildCreateUserSql(username: string, password: string, tab
 }
 
 export async function getExplainInfo(connectionId: string, database: string | undefined, schema: string | undefined, sql: string, mode: string): Promise<string | undefined> {
-  try {
-    const result = await post<string>("/api/query/get-explain-info", { connectionId, database, schema, sql, mode });
-    return result;
-  } catch {
-    return undefined;
-  }
+  // Match the Tauri path: transport and Agent failures must remain distinguishable from an empty plan.
+  return post<string>("/api/query/get-explain-info", { connectionId, database, schema, sql, mode });
 }
 
 export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlOptions): Promise<string | undefined> {
@@ -1428,6 +1425,10 @@ export async function readExternalSqlFile(_path: string): Promise<string> {
 
 export async function writeExternalSqlFile(_path: string, _content: string): Promise<void> {
   throw new Error("Saving external SQL file paths is only available in the desktop app");
+}
+
+export async function saveExternalSqlFile(_defaultFileName: string, _content: string): Promise<string | null> {
+  throw new Error("Saving SQL files locally is only available in the desktop app");
 }
 
 export interface SqlFileEntry {
@@ -2071,6 +2072,11 @@ export async function mongoFindDocuments(connectionId: string, database: string,
   return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, executionId);
 }
 
+export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
+  const raw = await post<Record<string, unknown>>("/api/mongo/parse-shell-command", { source });
+  return normalizeRustMongoCommand(raw);
+}
+
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
   return post("/api/mongo/find-one", { connectionId, database, collection, filter, projection, options, executionId });
 }
@@ -2136,8 +2142,8 @@ export async function mongoServerVersion(connectionId: string, database: string,
   return post("/api/mongo/server-version", { connectionId, database, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
-  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, optionsJson?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, optionsJson, executionId });
 }
 
 export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {

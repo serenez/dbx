@@ -17,7 +17,7 @@ vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@lucide/vue", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
   const icon = createPassthroughStub("Icon", "i");
-  return { Check: icon, ChevronLeft: icon, ChevronRight: icon, ChevronsLeft: icon, ChevronsRight: icon, Loader2: icon, Upload: icon, Search: icon, X: icon, Code2: icon, Copy: icon, Eye: icon, EyeOff: icon, Info: icon, Pencil: icon, Plus: icon, Trash2: icon };
+  return { Check: icon, ChevronDown: icon, ChevronLeft: icon, ChevronRight: icon, ChevronsLeft: icon, ChevronsRight: icon, Filter: icon, Loader2: icon, Upload: icon, Search: icon, X: icon, Code2: icon, Copy: icon, Eye: icon, EyeOff: icon, Info: icon, Pencil: icon, Plus: icon, Trash2: icon };
 });
 
 vi.mock("@/components/ui/button", async () => ({ Button: (await import("./vueHostHarness")).createPassthroughStub("Button", "button") }));
@@ -65,6 +65,7 @@ import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.v
 import DataGridColumnHeader from "@/components/grid/DataGridColumnHeader.vue";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
+import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
@@ -212,6 +213,67 @@ describe("DataGridColumnHeader", () => {
     dispatch(handle, "dblclick");
     expect(autoFit).toHaveBeenCalledOnce();
   });
+
+  it("keeps configured type and comment lines mounted for columns without values", () => {
+    const empty = mountComponent(DataGridColumnHeader, {
+      name: "id",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      showTypeLine: true,
+      showCommentLine: true,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const emptyType = findOne(empty.root, (node) => node.props["data-grid-header-type-line"] === "");
+    const emptyComment = findOne(empty.root, (node) => node.props["data-grid-header-comment-line"] === "");
+
+    expect(String(emptyType.props.class)).toContain("h-3");
+    expect(String(emptyType.props.class)).toContain("invisible");
+    expect(emptyType.props.title).toBeUndefined();
+    expect(String(emptyComment.props.class)).toContain("h-3");
+    expect(String(emptyComment.props.class)).toContain("invisible");
+    expect(emptyComment.props.title).toBeUndefined();
+
+    const populated = mountComponent(DataGridColumnHeader, {
+      name: "status",
+      actualColumnIndex: 1,
+      visibleColumnIndex: 1,
+      columnType: "varchar",
+      columnComment: "Current status",
+      showTypeLine: true,
+      showCommentLine: true,
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+    const populatedType = findOne(populated.root, (node) => node.props["data-grid-header-type-line"] === "");
+    const populatedComment = findOne(populated.root, (node) => node.props["data-grid-header-comment-line"] === "");
+
+    expect(String(populatedType.props.class)).not.toContain("invisible");
+    expect(populatedType.props.title).toBe("varchar");
+    expect(String(populatedComment.props.class)).not.toContain("invisible");
+    expect(populatedComment.props.title).toBe("Current status");
+  });
+
+  it("omits optional header lines when both display settings are off", () => {
+    const mounted = mountComponent(DataGridColumnHeader, {
+      name: "id",
+      actualColumnIndex: 0,
+      visibleColumnIndex: 0,
+      columnType: "number",
+      columnComment: "Identifier",
+      copyColumnNameLabel: "copy",
+      columnNameLabel: "name",
+      columnTypeLabel: "type",
+      columnCommentLabel: "comment",
+    });
+
+    expect(findAll(mounted.root, (node) => node.props["data-grid-header-type-line"] === "")).toHaveLength(0);
+    expect(findAll(mounted.root, (node) => node.props["data-grid-header-comment-line"] === "")).toHaveLength(0);
+  });
 });
 
 describe("DataGridFilterBuilder", () => {
@@ -223,6 +285,62 @@ describe("DataGridFilterBuilder", () => {
     expect(dispatch(searchInput, "keydown", { key: "Backspace" }).propagationStopped).toBe(true);
     expect(dispatch(searchInput, "keydown", { key: "ArrowDown" }).propagationStopped).toBe(false);
     expect(dispatch(searchInput, "keydown", { key: "Process", isComposing: true }).propagationStopped).toBe(true);
+  });
+});
+
+describe("DataGridQueryControls", () => {
+  it("keeps filter actions available in the popover", () => {
+    const clearFilters = vi.fn();
+    const applyFilters = vi.fn();
+    const resetFilters = vi.fn();
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "id = 1",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: true,
+      filterButtonActive: true,
+      filterButtonCount: 1,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [{ id: "r1", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+      onClearFilters: clearFilters,
+      onApplyFilters: applyFilters,
+      onResetFilters: resetFilters,
+    });
+
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.clearFilter"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.resetFilterBuilder"),
+      "click",
+    );
+    dispatch(
+      findOne(mounted.root, (node) => node.type === "button" && hostText(node) === "grid.applyFilter"),
+      "click",
+    );
+    const whereInput = findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE");
+    const whereControl = whereInput.parent?.parent;
+    expect(whereControl).toBeTruthy();
+    const whereButtons = findAll(whereControl!, (node) => node.type === "button");
+    dispatch(whereButtons[whereButtons.length - 1], "click");
+
+    expect(clearFilters).toHaveBeenCalledTimes(2);
+    expect(resetFilters).toHaveBeenCalledOnce();
+    expect(applyFilters).toHaveBeenCalledOnce();
   });
 });
 

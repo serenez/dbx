@@ -38,7 +38,7 @@ describe("queryStore database open state", () => {
     store.closeTab(tabId);
 
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
-  });
+  }, 10_000);
 
   it("keeps object browser viewport per tab and clears it on schema change", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");

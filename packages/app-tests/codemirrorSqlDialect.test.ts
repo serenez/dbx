@@ -104,5 +104,5 @@ test("propagates database type to every DDL viewer entrypoint", () => {
   assert.match(connectionTree, /<SidebarDdlViewDialog/);
   assert.match(connectionTree, /:database-type="sidebarDdlDatabaseType"/);
   assert.match(connectionTree, /v-model:open="sidebarDdlOpen"/);
-  assert.match(app, /<DdlViewDialog[^>]*:database-type="queryEditorDdlDatabaseType"[^>]*\/>/);
+  assert.match(app, /<QueryEditorDdlViewDialog[^>]*:database-type="queryEditorDdlDatabaseType"[^>]*\/>/);
 });

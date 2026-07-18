@@ -207,6 +207,7 @@ const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridS
 const columnWidthDensity = computed(() => settingsStore.editorSettings.columnWidthDensity);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
+const documentBrowserRef = ref<SearchableBrowserHandle>();
 
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
@@ -680,6 +681,7 @@ function onHandleCloseColumnPanel() {
 }
 
 function focusSearch(): boolean {
+  if (props.activeTab.mode === "mongo") return documentBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
@@ -695,6 +697,8 @@ function refreshQueryEditorCompletionCache(): boolean {
 }
 
 function refreshData(): boolean {
+  // Reuse ObjectBrowser's reload path so schema reloads and stale object-response guards stay intact.
+  if (props.activeTab.mode === "objects") return objectBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "etcd") return etcdKeyBrowserRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
@@ -800,7 +804,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
         <Pane class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
-              <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.24] dark:text-red-200/[0.2]">{{ productionWatermarkText }}</span>
+              <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.12] dark:text-red-200/[0.1]">{{ productionWatermarkText }}</span>
             </div>
             <QueryEditor
               ref="queryEditorRef"
@@ -1054,7 +1058,8 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
               </div>
             </div>
 
-            <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex min-h-7 shrink-0 items-center border-b bg-muted/20">
+            <!-- Keep this height in sync with the embedded result toolbar. -->
+            <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex h-8 shrink-0 items-center border-b bg-muted/20">
               <QueryResultViewSwitcher
                 :active-view="activeOutputView"
                 :can-show-result="canShowResultOutput"
@@ -1217,10 +1222,13 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
         <div class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs">
-          <span class="inline-flex items-center rounded border border-border bg-muted/50 px-2 py-0.5 font-medium truncate">
+          <span v-if="activeConnection?.name?.trim()" data-data-header-connection class="inline-flex max-w-48 min-w-0 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground" :title="activeConnection.name">
+            {{ activeConnection.name }}
+          </span>
+          <span class="inline-flex max-w-48 min-w-0 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium">
             {{ activeTab.tableMeta?.tableName || activeTab.title }}
           </span>
-          <span class="inline-flex items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground truncate">
+          <span class="inline-flex max-w-56 min-w-0 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground">
             <template v-if="activeTab.tableMeta?.schema">{{ activeTab.tableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
           </span>
           <span v-if="activeTab.mode === 'data' && activeTab.tableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }} </span>
@@ -1543,7 +1551,7 @@ defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, hand
     <!-- Document mode: MongoDB collections and Elasticsearch indices -->
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
-        <DocumentBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
+        <DocumentBrowser ref="documentBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
       </div>
     </template>
 

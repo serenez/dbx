@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { markRaw, ref, watch, computed } from "vue";
+import { computed, markRaw, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ConnectionConfig, DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
@@ -17,6 +17,7 @@ import {
   mongoDistinctToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
+  describeMongoCommandParseFailure,
   mongoDroppedIndexesToQueryResult,
   mongoIndexesToQueryResult,
   mongoUseToQueryResult,
@@ -39,7 +40,7 @@ import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
-import { queryResultSourceLabel } from "@/lib/sql/queryResultSource";
+import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
@@ -56,6 +57,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
+import { formatError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
@@ -154,6 +156,8 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
     const statement = statements[sourceIndex];
     if (!statement) continue;
     annotateQueryResultSource(result, statement.sql, database, databaseType, sourceOffset === undefined ? undefined : { from: sourceOffset + statement.from, to: sourceOffset + statement.to });
+    const customName = queryResultNameFromPreamble(sql.slice(statement.hitFrom, statement.from));
+    if (customName) result.sourceLabel = customName;
   }
   return results;
 }
@@ -457,7 +461,11 @@ export const useQueryStore = defineStore("query", () => {
       if (throwOnError) throw error;
     } finally {
       if (tab.resultSessionId === sessionId) tab.resultSessionId = undefined;
-      if (tab.result?.session_id === sessionId) tab.result.session_id = undefined;
+      if (tab.result?.session_id === sessionId) {
+        tab.result.session_id = undefined;
+        // 原地修改了负载，让持有它的 tab 与 run 的估算值都失效
+        invalidateResultEstimateForPayload(tab.result);
+      }
     }
   }
 
@@ -505,12 +513,27 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
-  function touchResult(tab: QueryTab | undefined, accessedAt = Date.now()) {
+  function touchResult(tab: QueryTab | undefined, accessedAt = Date.now(), options: { reuseEstimatedBytes?: boolean } = {}) {
     if (tab?.result || tab?.results) {
       tab.resultAccessedAt = accessedAt;
-      tab.resultEstimatedBytes = estimateQueryResultsBytes(tab.result, tab.results);
+      // 纯访问路径（如切换标签页）可复用已算好的估算值：estimateQueryResultsBytes
+      // 会同步深遍历整份结果集，挂在 sync watch 上会直接阻塞切页交互。
+      if (!options.reuseEstimatedBytes || tab.resultEstimatedBytes === undefined) {
+        tab.resultEstimatedBytes = estimateQueryResultsBytes(tab.result, tab.results);
+      }
       tab.resultCacheState = "memory";
       tab.resultEvicted = undefined;
+    }
+  }
+
+  /** 结果负载被原地修改（如保存后写回单元格）时，让持有它的 tab/run 的字节估算失效，下次访问按需重算。 */
+  function invalidateResultEstimateForPayload(result: QueryResult | undefined) {
+    if (!result) return;
+    for (const tab of tabs.value) {
+      if (tab.result === result || tab.results?.includes(result)) tab.resultEstimatedBytes = undefined;
+      for (const run of tab.resultRuns ?? []) {
+        if (run.result === result || run.results?.includes(result)) run.resultEstimatedBytes = undefined;
+      }
     }
   }
 
@@ -593,7 +616,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.queryEditabilityReason = run.queryEditabilityReason;
     tab.mongoEditTarget = run.mongoEditTarget;
     tab.tableMeta = run.tableMeta;
-    touchResult(tab);
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
   }
 
   async function restoreResultRunPayload(tab: QueryTab, runId: string) {
@@ -614,6 +637,9 @@ export const useQueryStore = defineStore("query", () => {
         result: snapshotRun.result ? markQueryResultRowsRaw(snapshotRun.result) : undefined,
         results: snapshotRun.results ? markQueryResultsRowsRaw(snapshotRun.results) : undefined,
         resultCacheState: "memory" as const,
+        // 快照编解码会重建负载（如省略 session_id），落盘前的估算值不再对应
+        // 恢复后的对象，置空以便 projectResultRun 按当前负载重算
+        resultEstimatedBytes: undefined,
       },
     ])[0]!;
     tab.resultRuns = tab.resultRuns?.map((item) => (item.id === runId ? restoredRun : item));
@@ -845,7 +871,8 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultLocalSortOriginalMongoDocuments = undefined;
     }
 
-    touchResult(tab);
+    // 本地排序只是重排既有行/文档，字节规模不变，可复用估算值
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     syncDisplayedResultRun(tab, tab.resultBaseSql ?? tab.lastExecutedSql ?? tab.sql);
   }
 
@@ -974,6 +1001,11 @@ export const useQueryStore = defineStore("query", () => {
     },
     { flush: "post" },
   );
+
+  onScopeDispose(() => {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = null;
+  });
 
   // Immediately flush any pending debounced persist so the on-disk content
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
@@ -1839,7 +1871,6 @@ export const useQueryStore = defineStore("query", () => {
     const tableMeta = tableMetaForDataTab(tab);
     if (!tableMeta?.tableName) return false;
 
-    const settingsStore = useSettingsStore();
     const connStore = useConnectionStore();
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
@@ -1847,7 +1878,7 @@ export const useQueryStore = defineStore("query", () => {
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
     const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
     const orderBy = tab.orderByInput?.trim() || sortOrder;
-    const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
+    const limit = tab.resultPageLimit ?? tableOpenPageLimit();
     const offset = tab.resultPageOffset ?? 0;
     const refreshPreparationId = uuid();
 
@@ -2272,6 +2303,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = undefined;
     tab.executionId = undefined;
+    touchResult(tab);
   }
 
   function clearAcknowledgedCancelIfStillRunning(id: string, executionId: string) {
@@ -2884,6 +2916,12 @@ export const useQueryStore = defineStore("query", () => {
         return;
       }
 
+      if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
+        // Avoid falling through to the SQL executor, which only returns the generic
+        // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
+        throw new Error(describeMongoCommandParseFailure(sql));
+      }
+
       if (mongoCommands.length > 0) {
         queryExecutionLog("info", "mongo:start", { traceId, commandCount: mongoCommands.length, sqlLength: sql.length });
 
@@ -2894,7 +2932,7 @@ export const useQueryStore = defineStore("query", () => {
         let mongoEditTarget: QueryTab["mongoEditTarget"] | undefined;
 
         for (const parsedCommand of mongoCommands) {
-          const mongoCommand = parsedCommand.command;
+          let mongoCommand = parsedCommand.command;
           const sourceStatement = parsedCommand.text;
           const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + parsedCommand.from, to: options.sourceOffset + parsedCommand.to };
           const commandStartedAt = performance.now();
@@ -2906,6 +2944,9 @@ export const useQueryStore = defineStore("query", () => {
             return annotated;
           };
           try {
+            // The frontend parser remains responsible for editor ranges, while
+            // dbx-core is authoritative for command semantics at execution time.
+            mongoCommand = await api.mongoParseShellCommand(sourceStatement);
             switch (mongoCommand.kind) {
               case "find": {
                 queryExecutionLog("info", "mongo-find:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
@@ -2972,7 +3013,7 @@ export const useQueryStore = defineStore("query", () => {
                 }
                 queryExecutionLog("info", "mongo-aggregate:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
-                const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, executionId);
+                const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, mongoCommand.options, executionId);
                 allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-aggregate:done", {
@@ -3561,7 +3602,8 @@ export const useQueryStore = defineStore("query", () => {
         const current = tabs.value.find((t) => t.id === id);
         if (current?.explainExecutionId === executionId) {
           current.explainPlan = undefined;
-          current.explainError = String(e?.message || e);
+          // Backend rejections contain the real ORA/Agent diagnostic; only successful empty responses use the generic empty-plan message.
+          current.explainError = formatError(e);
         }
       } finally {
         const current = tabs.value.find((t) => t.id === id);
@@ -3806,11 +3848,9 @@ export const useQueryStore = defineStore("query", () => {
       if (tab) useConnectionStore().recordConnectionLostError(tab.connectionId, e);
       const current = tabs.value.find((t) => t.id === id);
       if (current && current.executionId === executionId) {
-        current.isExecuting = false;
-        current.isCancelling = false;
-        current.executionId = undefined;
-        current.queryExecutionStartedAt = undefined;
-        current.result = toErrorResult(e);
+        // 复用 setErrorResult 的完整清理：分组结果不清空的话，错误结果不会展示，
+        // 估算值也会继续按旧的 results 计算
+        setErrorResult(id, e);
       }
       return false;
     } finally {
@@ -3845,7 +3885,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortDirection = undefined;
     tab.resultSortMode = undefined;
     tab.resultSortedSql = undefined;
-    touchResult(tab);
+    // results 数组未变，估算值与当前激活的 result 无关，可直接复用
+    touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -3863,12 +3904,8 @@ export const useQueryStore = defineStore("query", () => {
     if (stuck.length > 0) {
       const connStore = useConnectionStore();
       stuck.forEach((tab) => {
-        tab.isExecuting = false;
-        tab.isCancelling = false;
-        tab.queryExecutionStartedAt = undefined;
-        tab.executionId = undefined;
         const error = new Error(t("editor.connectionMayBeLost"));
-        tab.result = toErrorResult(error);
+        setErrorResult(tab.id, error);
         connStore.markConnectionLost(tab.connectionId, error);
       });
     }
@@ -3944,7 +3981,11 @@ export const useQueryStore = defineStore("query", () => {
     activeTabId,
     (id) => {
       rememberActiveTab(id);
-      touchResult(tabs.value.find((tab) => tab.id === id));
+      touchResult(
+        tabs.value.find((tab) => tab.id === id),
+        Date.now(),
+        { reuseEstimatedBytes: true },
+      );
     },
     { flush: "sync" },
   );
@@ -3959,7 +4000,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;
-    tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns) : tab.resultRuns;
+    // 快照编解码会重建负载，落盘前的各 run 估算值不再对应恢复后的对象，
+    // 置空让 projectResultRun 按需重算
+    tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns).map((run) => ({ ...run, resultEstimatedBytes: undefined })) : tab.resultRuns;
     tab.activeResultRunId = snapshot.activeResultRunId ?? tab.activeResultRunId;
     if (!tab.result && !tab.results && !tab.resultRuns) return false;
 
@@ -4344,6 +4387,7 @@ export const useQueryStore = defineStore("query", () => {
     setExecuting,
     setExecutingWithId,
     setErrorResult,
+    invalidateResultEstimateForPayload,
     toggleResultAutoSave,
     setActiveResultRun,
     removeResultRun,

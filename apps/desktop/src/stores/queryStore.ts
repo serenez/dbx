@@ -4018,7 +4018,17 @@ export const useQueryStore = defineStore("query", () => {
     tab.querySourceColumns = snapshot.querySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;
     tab.mongoEditTarget = snapshot.mongoEditTarget;
-    tab.tableMeta = snapshot.tableMeta;
+    // Data tab 快照可能是延迟元数据期间落盘的空列占位身份：不得用它回滚
+    // 之后已落地的真实元数据（否则 pending 已清除而行标识又变未知，编辑
+    // 门控失效）；若恢复后确实没有真实列，重新挂起编辑门控
+    if (tab.tableMeta?.columns.length && !snapshot.tableMeta?.columns.length) {
+      // 保留当前真实元数据，忽略快照中的占位身份
+    } else {
+      tab.tableMeta = snapshot.tableMeta;
+    }
+    if (tab.mode === "data" && !tab.tableMeta?.columns.length) {
+      tab.tableMetaPending = true;
+    }
     tab.resultPageSql = snapshot.resultPageSql;
     tab.resultPageLimit = snapshot.resultPageLimit;
     tab.resultPageOffset = snapshot.resultPageOffset;

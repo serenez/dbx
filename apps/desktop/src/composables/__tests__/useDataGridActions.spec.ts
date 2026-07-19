@@ -1,6 +1,7 @@
 import { computed } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
+import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import type { QueryTab } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -88,6 +89,7 @@ function tableDataTab(patch: Partial<QueryTab> = {}): QueryTab {
 
 describe("useDataGridActions", () => {
   beforeEach(() => {
+    clearTableMetadataCache();
     vi.clearAllMocks();
     mocks.tabs.length = 0;
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
@@ -181,7 +183,7 @@ describe("useDataGridActions", () => {
     });
   });
 
-  it("retries the metadata refresh on the next reload when a stale-tab check skipped the previous one", async () => {
+  it("reuses an in-flight metadata refresh when a later reload can apply the result", async () => {
     const tab = tableDataTab({
       tableMeta: { schema: "public", tableName: "users", tableType: "TABLE", columns: [], primaryKeys: [] },
       tableMetaUpdatedAt: Date.now(),
@@ -196,11 +198,12 @@ describe("useDataGridActions", () => {
     expect(mocks.setTableMeta).not.toHaveBeenCalled();
     expect(tab.tableMetaPending).toBe(true);
 
-    // 第二轮：真实 columns 仍为空 → 即使 tableMetaUpdatedAt 是新的也必须重试
+    // 第二轮：真实 columns 仍为空，新的消费者加入同一在途请求；共享缓存应
+    // 去重后端调用，但本轮仍要在目标恢复后落地结果
     mocks.tabs.push(tab);
     await actions.onReloadData(tab.sql, "", "", "", undefined, undefined, "refresh");
     await vi.waitFor(() => {
-      expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+      expect(mocks.getColumns).toHaveBeenCalledTimes(1);
       expect(mocks.setTableMeta).toHaveBeenCalledWith("tab-1", expect.objectContaining({ primaryKeys: ["id"] }));
     });
   });

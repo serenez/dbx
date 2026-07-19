@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
+import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import type { QueryTab } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -96,6 +97,7 @@ function column(name: string) {
 
 describe("useNavigationTargets openTableTarget", () => {
   beforeEach(() => {
+    clearTableMetadataCache();
     vi.clearAllMocks();
     mocks.tabs.length = 0;
     mocks.reuseDataTab = true;
@@ -126,6 +128,38 @@ describe("useNavigationTargets openTableTarget", () => {
     expect(pendingDuringQuery).toBe(true);
     expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["id"]);
     expect(mocks.tabs[0]?.tableMetaPending).toBe(false);
+  });
+
+  it("reuses cached metadata and force-refreshes it once per catalog after a structure save", async () => {
+    const navigation = useNavigationTargets(dialogs);
+    const target = { connectionId: "connection-1", database: "app", schema: "public", catalog: "catalog-1", tableName: "users" };
+
+    await navigation.openLineageTarget(target);
+    await navigation.openLineageTarget(target);
+    expect(mocks.getColumns).toHaveBeenCalledTimes(1);
+
+    const firstTab = mocks.tabs[0]!;
+    mocks.tabs.push({ ...firstTab, id: "tab-2", tableMeta: { ...firstTab.tableMeta! } });
+    mocks.getColumns.mockResolvedValueOnce([column("fresh_id")]);
+
+    await navigation.onStructureEditorSaved(vi.fn().mockResolvedValue(undefined), vi.fn(), {
+      connectionId: target.connectionId,
+      database: target.database,
+      schema: target.schema,
+      tableName: target.tableName,
+    });
+
+    expect(mocks.getColumns).toHaveBeenCalledTimes(2);
+    expect(mocks.tabs.map((tab) => tab.tableMeta?.primaryKeys)).toEqual([["fresh_id"], ["fresh_id"]]);
+  });
+
+  it("keeps row identity pending when shared metadata loading fails", async () => {
+    mocks.getColumns.mockRejectedValueOnce(new Error("metadata unavailable"));
+
+    await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
+
+    expect(mocks.tabs[0]?.tableMeta?.columns).toEqual([]);
+    expect(mocks.tabs[0]?.tableMetaPending).toBe(true);
   });
 
   it("does not let a stale navigation land metadata over a newer target on a reused tab", async () => {

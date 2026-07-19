@@ -283,7 +283,7 @@ export function useSidebarDataOpenRuntime() {
       } else if (deferTableMetaRefresh) {
         logPhase("metadata-deferred", { tabId });
       } else {
-        void refreshTableMetaInBackground();
+        void refreshTableMetaInBackground(tabId);
         logPhase("metadata-started", { tabId });
       }
 
@@ -334,13 +334,8 @@ export function useSidebarDataOpenRuntime() {
       });
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
       logPhase("execute-tab-sql", { tabId });
-<<<<<<< HEAD
-      if (shouldRefreshTableMeta && canApplyTableMetadata(tabId)) {
+      if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);
-=======
-      if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata()) {
-        void refreshTableMetaInBackground();
->>>>>>> 86c1a7fe5 (fix(sidebar): 修复首次打开表数据的主键识别)
         logPhase("metadata-started", { tabId });
       }
     } catch (e: any) {
